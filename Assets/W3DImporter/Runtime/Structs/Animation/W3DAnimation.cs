@@ -49,19 +49,16 @@ namespace W3DImporter.Structs.Animation
         public float FrameRate;
     }
 
-    public class W3DTimeCodedDatum
-    {
-        public uint TimeCode;
-        public float Value;
-        public bool NonInterpolated;
-    }
-
+    // TimeCoded compressed channel: separate timeCodes[] and data[] arrays.
+    // TIMECODED channel types: 0 = X translation, 1 = Y translation,
+    // 2 = Z translation, 3 = Quaternion (VectorLen = 4, xyzw per key).
     public class W3DTimeCodedChannel
     {
-        public int ChannelType;
+        public int ChannelType; // from Flags field
         public int VectorLen;
         public int Pivot;
-        public List<W3DTimeCodedDatum> Data = new List<W3DTimeCodedDatum>();
+        public List<ushort> TimeCodes = new List<ushort>();
+        public List<float> Data = new List<float>();
     }
 
     public class W3DCompressedAnimation

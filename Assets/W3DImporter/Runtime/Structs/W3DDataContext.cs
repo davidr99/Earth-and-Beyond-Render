@@ -15,7 +15,9 @@ namespace W3DImporter.Structs
         public W3DHierarchy Hierarchy;
         public W3DHLod HLod;
         public W3DAnimation Animation;
+        public List<W3DAnimation> Animations = new List<W3DAnimation>();
         public W3DCompressedAnimation CompressedAnimation;
+        public List<W3DCompressedAnimation> CompressedAnimations = new List<W3DCompressedAnimation>();
         public List<W3DCollisionBox> CollisionBoxes = new List<W3DCollisionBox>();
         public List<W3DEmitter> Emitters = new List<W3DEmitter>();
         public W3DAggregate Aggregate;

@@ -20,7 +20,7 @@ namespace W3DImporter.Parsers
                             Name = reader.ReadFixedString(),
                             HierarchyName = reader.ReadFixedString(),
                             NumFrames = reader.ReadInt32(),
-                            FrameRate = reader.ReadFloat()
+                            FrameRate = reader.ReadUInt32() // on disk u32, stored as float in struct
                         };
                         break;
                     case W3DChunkTypes.ANIMATION_CHANNEL:
@@ -87,12 +87,17 @@ namespace W3DImporter.Parsers
                             Name = reader.ReadFixedString(),
                             HierarchyName = reader.ReadFixedString(),
                             NumFrames = reader.ReadInt32(),
-                            Flavor = reader.ReadUInt16(),
-                            FrameRate = reader.ReadFloat()
+                            FrameRate = reader.ReadUInt16(), // u16 on disk, stored as float
+                            Flavor = reader.ReadUInt16()
                         };
                         break;
                     case W3DChunkTypes.COMPRESSED_ANIMATION_CHANNEL:
-                        anim.TimeCodedChannels.Add(ReadTimeCodedChannel(reader, chunk.ChunkEnd));
+                        if (anim.Header != null && anim.Header.Flavor == 0)
+                        {
+                            var channel = ReadTimeCodedChannel(reader, chunk.ChunkEnd);
+                            if (channel != null)
+                                anim.TimeCodedChannels.Add(channel);
+                        }
                         break;
                     case W3DChunkTypes.COMPRESSED_BIT_CHANNEL:
                         // Similar to regular bit channel
@@ -107,21 +112,42 @@ namespace W3DImporter.Parsers
 
         private static W3DTimeCodedChannel ReadTimeCodedChannel(W3DBinaryReader reader, long end)
         {
+            const int channelHeaderSize = 12;
+            if (end - reader.Position < channelHeaderSize)
+                return null;
+
+            // Layout: u32 numTimeCodes, u16 pivot, u16 vectorLen, u16 flags (channel type),
+            // u16 padding, then u16[numTimeCodes] timecodes (2-byte aligned),
+            // then float[numTimeCodes * vectorLen] data.
             var ch = new W3DTimeCodedChannel();
             int numTimeCodes = reader.ReadInt32();
             ch.Pivot = reader.ReadUInt16();
-            ch.VectorLen = reader.ReadByte();
-            ch.ChannelType = reader.ReadByte();
+            ch.VectorLen = reader.ReadUInt16();
+            ch.ChannelType = reader.ReadUInt16();
+            reader.Skip(2); // padding/reserved
+
+            if (numTimeCodes < 0 || ch.VectorLen <= 0)
+                return null;
+
+            long remaining = end - reader.Position;
+            long timeCodeBytes = (long)numTimeCodes * 2L;
+            long alignmentBytes = (numTimeCodes & 1) != 0 ? 2L : 0L;
+            long dataBytes = (long)numTimeCodes * ch.VectorLen * 4L;
+            long totalBytes = timeCodeBytes + alignmentBytes + dataBytes;
+
+            if (totalBytes < 0 || totalBytes > remaining)
+                return null;
 
             for (int i = 0; i < numTimeCodes; i++)
-            {
-                var datum = new W3DTimeCodedDatum();
-                uint rawTimeCode = reader.ReadUInt32();
-                datum.NonInterpolated = (rawTimeCode & 0x80000000) != 0;
-                datum.TimeCode = rawTimeCode & 0x7FFFFFFF;
-                datum.Value = reader.ReadFloat();
-                ch.Data.Add(datum);
-            }
+                ch.TimeCodes.Add(reader.ReadUInt16());
+
+            // Pad timecode array to 4-byte boundary so floats are aligned.
+            if ((numTimeCodes & 1) != 0)
+                reader.Skip(2);
+
+            int numValues = numTimeCodes * ch.VectorLen;
+            for (int i = 0; i < numValues; i++)
+                ch.Data.Add(reader.ReadFloat());
 
             return ch;
         }

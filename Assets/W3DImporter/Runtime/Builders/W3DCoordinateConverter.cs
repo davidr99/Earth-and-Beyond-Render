@@ -10,8 +10,8 @@ namespace W3DImporter.Builders
     /// </summary>
     public static class W3DCoordinateConverter
     {
-        private static readonly Quaternion BasisRotation = Quaternion.Euler(-90f, 0f, 0f);
-        private static readonly Quaternion InverseBasisRotation = Quaternion.Inverse(BasisRotation);
+        public static readonly Quaternion BasisRotation = Quaternion.Euler(-90f, 0f, 0f);
+        public static readonly Quaternion InverseBasisRotation = Quaternion.Inverse(BasisRotation);
 
         public static Vector3 ConvertPosition(Vector3 w3d)
         {

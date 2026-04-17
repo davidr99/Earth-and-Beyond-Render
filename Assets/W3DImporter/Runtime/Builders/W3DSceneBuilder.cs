@@ -7,6 +7,7 @@ using W3DImporter.Structs.Mesh;
 using W3DImporter.Structs.Hierarchy;
 using W3DImporter.Structs.HLod;
 using W3DImporter.Structs.Aggregate;
+using W3DImporter.Structs.Animation;
 using W3DImporter.Parsers;
 
 namespace W3DImporter.Builders
@@ -179,6 +180,8 @@ namespace W3DImporter.Builders
             if (context.Aggregate != null)
                 BuildAggregateSubModels(context, root.transform, boneTransforms);
 
+            AttachAnimation(root, context);
+
             foreach (var box in context.CollisionBoxes)
             {
                 W3DCollisionBoxBuilder.Build(box, root.transform, boneTransforms);
@@ -199,6 +202,59 @@ namespace W3DImporter.Builders
             }
 
             return root;
+        }
+
+        private void AttachAnimation(GameObject root, W3DDataContext context)
+        {
+            if (context.Hierarchy == null)
+                return;
+
+            LoadExternalAnimations(context);
+
+            var clips = new List<AnimationClip>();
+            var clipNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            AddClip(context.Animation, context.Hierarchy, clips, clipNames);
+            for (int i = 0; i < context.Animations.Count; i++)
+                AddClip(context.Animations[i], context.Hierarchy, clips, clipNames);
+
+            AddClip(context.CompressedAnimation, context.Hierarchy, clips, clipNames);
+            for (int i = 0; i < context.CompressedAnimations.Count; i++)
+                AddClip(context.CompressedAnimations[i], context.Hierarchy, clips, clipNames);
+
+            if (clips.Count == 0)
+                return;
+
+            var animation = root.GetComponent<Animation>() ?? root.AddComponent<Animation>();
+            for (int i = 0; i < clips.Count; i++)
+                animation.AddClip(clips[i], clips[i].name);
+
+            animation.clip = clips[0];
+            animation.wrapMode = WrapMode.Loop;
+            animation.playAutomatically = true;
+            animation.Play(clips[0].name);
+
+            Debug.Log($"[W3D] Attached {clips.Count} animation clip(s); playing '{clips[0].name}'");
+        }
+
+        private void AddClip(W3DAnimation animationData, W3DHierarchy hierarchy, List<AnimationClip> clips, HashSet<string> clipNames)
+        {
+            if (animationData == null)
+                return;
+
+            var clip = W3DAnimationBuilder.Build(animationData, hierarchy);
+            if (clip != null && clipNames.Add(clip.name))
+                clips.Add(clip);
+        }
+
+        private void AddClip(W3DCompressedAnimation animationData, W3DHierarchy hierarchy, List<AnimationClip> clips, HashSet<string> clipNames)
+        {
+            if (animationData == null)
+                return;
+
+            var clip = W3DCompressedAnimationBuilder.Build(animationData, hierarchy);
+            if (clip != null && clipNames.Add(clip.name))
+                clips.Add(clip);
         }
 
         private void BuildHierarchy(W3DHierarchy hierarchy, Transform root, Dictionary<int, Transform> boneMap)
@@ -261,6 +317,60 @@ namespace W3DImporter.Builders
                 else
                 {
                     Debug.LogWarning($"[W3D] Hierarchy file not found: {skelPath}");
+                }
+            }
+        }
+
+        private void LoadExternalAnimations(W3DDataContext context)
+        {
+            string hierarchyName = context.Hierarchy?.Header?.Name;
+            if (string.IsNullOrWhiteSpace(hierarchyName) || string.IsNullOrWhiteSpace(_baseDirectory) || !Directory.Exists(_baseDirectory))
+                return;
+
+            var knownUncompressed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (context.Animation?.Header != null)
+                knownUncompressed.Add(context.Animation.Header.Name);
+            for (int i = 0; i < context.Animations.Count; i++)
+            {
+                if (context.Animations[i]?.Header != null)
+                    knownUncompressed.Add(context.Animations[i].Header.Name);
+            }
+
+            var knownCompressed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (context.CompressedAnimation?.Header != null)
+                knownCompressed.Add(context.CompressedAnimation.Header.Name);
+            for (int i = 0; i < context.CompressedAnimations.Count; i++)
+            {
+                if (context.CompressedAnimations[i]?.Header != null)
+                    knownCompressed.Add(context.CompressedAnimations[i].Header.Name);
+            }
+
+            foreach (var path in Directory.GetFiles(_baseDirectory, "*.w3d"))
+            {
+                var foundAnimations = new List<W3DAnimation>();
+                var foundCompressedAnimations = new List<W3DCompressedAnimation>();
+                W3DFileParser.CollectAnimations(path, hierarchyName, foundAnimations, foundCompressedAnimations);
+
+                for (int i = 0; i < foundAnimations.Count; i++)
+                {
+                    var animation = foundAnimations[i];
+                    if (animation?.Header == null || !knownUncompressed.Add(animation.Header.Name))
+                        continue;
+
+                    context.Animations.Add(animation);
+                    if (context.Animation == null && context.CompressedAnimation == null)
+                        context.Animation = animation;
+                }
+
+                for (int i = 0; i < foundCompressedAnimations.Count; i++)
+                {
+                    var animation = foundCompressedAnimations[i];
+                    if (animation?.Header == null || !knownCompressed.Add(animation.Header.Name))
+                        continue;
+
+                    context.CompressedAnimations.Add(animation);
+                    if (context.Animation == null && context.CompressedAnimation == null)
+                        context.CompressedAnimation = animation;
                 }
             }
         }

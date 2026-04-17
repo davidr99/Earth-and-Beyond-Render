@@ -11,7 +11,7 @@ namespace W3DImporter.Builders
         {
             var go = new GameObject(w3dMesh.Name);
 
-            if (w3dMesh.EffectiveHidden)
+            if (w3dMesh.EffectiveHidden || IsNonRenderableMarker(w3dMesh.Name))
                 go.SetActive(false);
 
             var mesh = new UnityEngine.Mesh();
@@ -58,6 +58,8 @@ namespace W3DImporter.Builders
             renderer.sharedMaterials = materials;
             renderer.shadowCastingMode = w3dMesh.CastsShadow ? ShadowCastingMode.On : ShadowCastingMode.Off;
             renderer.receiveShadows = w3dMesh.CastsShadow;
+            AttachAnimatedTextures(go, w3dMesh, textureResolver, materials);
+            AttachAtlasAnimators(go, w3dMesh, materials);
             AttachUvScroller(go, w3dMesh);
             AttachBillboard(go, w3dMesh);
 
@@ -75,6 +77,14 @@ namespace W3DImporter.Builders
             return go;
         }
 
+        // E&B uses "D_LIGHT##" mesh-name markers for dynamic light placement at runtime.
+        // The mesh itself is a proxy/placeholder geometry and shouldn't render in the scene.
+        private static bool IsNonRenderableMarker(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            return name.StartsWith("D_LIGHT", System.StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void AttachUvScroller(GameObject go, W3DMesh w3dMesh)
         {
             var effect = w3dMesh.EffectPass;
@@ -85,6 +95,245 @@ namespace W3DImporter.Builders
             scroller.CycleTime = effect.CycleTime.Value;
             scroller.StartV = effect.StartVCoord ?? 0f;
             scroller.EndV = effect.EndVCoord ?? 1f;
+        }
+
+        private static void AttachAnimatedTextures(GameObject go, W3DMesh w3dMesh, W3DTextureResolver textureResolver, Material[] materials)
+        {
+            if (materials == null || materials.Length == 0 || w3dMesh.Textures.Count == 0)
+                return;
+
+            var slots = new List<W3DAnimatedTexture.Slot>();
+            for (int matIndex = 0; matIndex < materials.Length; matIndex++)
+            {
+                var textureInfo = GetAnimatedTextureInfo(w3dMesh, matIndex);
+                if (textureInfo == null || !textureInfo.IsAnimated)
+                    continue;
+
+                var frames = textureResolver.ResolveAnimation(textureInfo.File, textureInfo.FrameCount);
+                if (frames == null || frames.Length <= 1)
+                    continue;
+
+                slots.Add(new W3DAnimatedTexture.Slot
+                {
+                    MaterialIndex = matIndex,
+                    Frames = frames,
+                    AnimType = textureInfo.AnimType,
+                    FrameRate = textureInfo.FrameRate
+                });
+
+                Debug.Log($"[W3D] Animated texture '{textureInfo.File}' on '{w3dMesh.Name}': frames={frames.Length} animType={textureInfo.AnimType} fps={textureInfo.FrameRate}");
+            }
+
+            if (slots.Count == 0)
+                return;
+
+            var animator = go.AddComponent<W3DAnimatedTexture>();
+            animator.Slots = slots.ToArray();
+        }
+
+        private static void AttachAtlasAnimators(GameObject go, W3DMesh w3dMesh, Material[] materials)
+        {
+            if (materials == null || materials.Length == 0 || w3dMesh.VertMaterials.Count == 0)
+                return;
+
+            var slots = new List<W3DAtlasAnimator.Slot>();
+            for (int matIndex = 0; matIndex < materials.Length; matIndex++)
+            {
+                var config = GetGridMapperConfig(w3dMesh, matIndex);
+                if (config == null)
+                    continue;
+
+                slots.Add(new W3DAtlasAnimator.Slot
+                {
+                    MaterialIndex = matIndex,
+                    GridWidth = config.GridWidth,
+                    FrameCount = config.FrameCount,
+                    FramesPerSecond = config.FramesPerSecond
+                });
+
+                Debug.Log($"[W3D] Atlas mapper on '{w3dMesh.Name}' mat={matIndex}: grid={config.GridWidth} fps={config.FramesPerSecond} frames={config.FrameCount}");
+            }
+
+            if (slots.Count == 0)
+                return;
+
+            var animator = go.AddComponent<W3DAtlasAnimator>();
+            animator.Slots = slots.ToArray();
+        }
+
+        private static W3DTexture GetAnimatedTextureInfo(W3DMesh w3dMesh, int matIndex)
+        {
+            string explicitTextureName = w3dMesh.EffectPass?.Texture;
+            if (string.IsNullOrWhiteSpace(explicitTextureName))
+                explicitTextureName = w3dMesh.Surface?.ColorMap;
+
+            if (!string.IsNullOrWhiteSpace(explicitTextureName))
+            {
+                string normalized = NormalizeTextureName(explicitTextureName);
+                for (int i = 0; i < w3dMesh.Textures.Count; i++)
+                {
+                    var texture = w3dMesh.Textures[i];
+                    if (NormalizeTextureName(texture.File) == normalized)
+                        return texture;
+                }
+            }
+
+            int texIdx = -1;
+            int preferredStage = GetPreferredTextureStage(w3dMesh, matIndex);
+            if (w3dMesh.MaterialPasses.Count > 0)
+            {
+                var pass = w3dMesh.MaterialPasses[0];
+                if (preferredStage >= 0 && preferredStage < pass.TxStages.Count &&
+                    pass.TxStages[preferredStage].TxIds.Count > 0)
+                {
+                    var txIds = pass.TxStages[preferredStage].TxIds[0];
+                    if (txIds.Count > 0)
+                        texIdx = txIds[0];
+                }
+            }
+
+            if (texIdx < 0 && matIndex < w3dMesh.Textures.Count)
+                texIdx = matIndex;
+
+            if (texIdx < 0 || texIdx >= w3dMesh.Textures.Count)
+                return null;
+
+            return w3dMesh.Textures[texIdx];
+        }
+
+        private static string NormalizeTextureName(string textureName)
+        {
+            if (string.IsNullOrWhiteSpace(textureName))
+                return string.Empty;
+
+            return System.IO.Path.GetFileNameWithoutExtension(textureName).Trim().ToUpperInvariant();
+        }
+
+        private sealed class GridMapperConfig
+        {
+            public int GridWidth;
+            public int FrameCount;
+            public float FramesPerSecond;
+        }
+
+        private static GridMapperConfig GetGridMapperConfig(W3DMesh w3dMesh, int matIndex)
+        {
+            var vm = GetVertexMaterialForMaterial(w3dMesh, matIndex);
+            if (vm?.Info == null)
+                return null;
+
+            int preferredStage = GetPreferredTextureStage(w3dMesh, matIndex);
+            string args = preferredStage == 1 ? vm.VmArgs1 : vm.VmArgs0;
+            if (string.IsNullOrWhiteSpace(args))
+                return null;
+
+            int mapping = preferredStage == 1
+                ? (int)(vm.Info.Attributes & 0x0000FF00u)
+                : (int)(vm.Info.Attributes & 0x00FF0000u);
+
+            bool isGrid = preferredStage == 1 ? mapping == 0x00000700 : mapping == 0x00070000;
+            if (!isGrid)
+                return null;
+
+            int log2Width = GetIniInt(args, "Log2Width", 1);
+            int gridWidth = Mathf.Max(1, 1 << log2Width);
+            int maxFrames = gridWidth * gridWidth;
+            int last = GetIniInt(args, "Last", 0);
+            float fps = GetIniFloat(args, "FPS", 1f);
+            int frameCount = last <= 0 ? maxFrames : Mathf.Clamp(last, 1, maxFrames);
+
+            return new GridMapperConfig
+            {
+                GridWidth = gridWidth,
+                FrameCount = frameCount,
+                FramesPerSecond = fps
+            };
+        }
+
+        private static int GetPreferredTextureStage(W3DMesh w3dMesh, int matIndex)
+        {
+            var vm = GetVertexMaterialForMaterial(w3dMesh, matIndex);
+            if (vm?.Info == null)
+                return 0;
+
+            int stage0 = (int)(vm.Info.Attributes & 0x00FF0000u);
+            int stage1 = (int)(vm.Info.Attributes & 0x0000FF00u);
+
+            if (stage0 == 0x00070000)
+                return 0;
+            if (stage1 == 0x00000700)
+                return 1;
+
+            return 0;
+        }
+
+        private static W3DVertexMaterial GetVertexMaterialForMaterial(W3DMesh w3dMesh, int matIndex)
+        {
+            if (w3dMesh.MaterialPasses.Count > 0)
+            {
+                var pass = w3dMesh.MaterialPasses[0];
+                if (pass.VertexMaterialIds.Count > 0)
+                {
+                    int vmIndex = pass.VertexMaterialIds[Mathf.Clamp(matIndex, 0, pass.VertexMaterialIds.Count - 1)];
+                    if (vmIndex >= 0 && vmIndex < w3dMesh.VertMaterials.Count)
+                        return w3dMesh.VertMaterials[vmIndex];
+                }
+            }
+
+            if (matIndex >= 0 && matIndex < w3dMesh.VertMaterials.Count)
+                return w3dMesh.VertMaterials[matIndex];
+
+            return null;
+        }
+
+        private static int GetIniInt(string text, string key, int fallback)
+        {
+            if (TryGetIniValue(text, key, out string value) &&
+                int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int parsed))
+            {
+                return parsed;
+            }
+
+            return fallback;
+        }
+
+        private static float GetIniFloat(string text, string key, float fallback)
+        {
+            if (TryGetIniValue(text, key, out string value) &&
+                float.TryParse(value, System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands, System.Globalization.CultureInfo.InvariantCulture, out float parsed))
+            {
+                return parsed;
+            }
+
+            return fallback;
+        }
+
+        private static bool TryGetIniValue(string text, string key, out string value)
+        {
+            value = null;
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var lines = text.Replace("\r", string.Empty).Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0)
+                    continue;
+
+                int equals = line.IndexOf('=');
+                if (equals <= 0)
+                    continue;
+
+                string candidateKey = line.Substring(0, equals).Trim();
+                if (!string.Equals(candidateKey, key, System.StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                value = line.Substring(equals + 1).Trim();
+                return true;
+            }
+
+            return false;
         }
 
         private static void AttachBillboard(GameObject go, W3DMesh w3dMesh)
@@ -133,8 +382,16 @@ namespace W3DImporter.Builders
 
             var pass = w3dMesh.MaterialPasses[0];
             List<Vector2> rawUVs = null;
+            int preferredStage = GetPreferredTextureStage(w3dMesh, 0);
 
-            if (pass.TxStages.Count > 0 && pass.TxStages[0].TxCoords.Count > 0)
+            if (preferredStage >= 0 &&
+                preferredStage < pass.TxStages.Count &&
+                pass.TxStages[preferredStage].TxCoords.Count > 0)
+            {
+                rawUVs = pass.TxStages[preferredStage].TxCoords[0];
+                Debug.Log($"[W3D UV] {w3dMesh.Name}: from TxStage[{preferredStage}], {rawUVs.Count} UVs, {mesh.vertexCount} verts");
+            }
+            else if (pass.TxStages.Count > 0 && pass.TxStages[0].TxCoords.Count > 0)
             {
                 rawUVs = pass.TxStages[0].TxCoords[0];
                 Debug.Log($"[W3D UV] {w3dMesh.Name}: from TxStage[0], {rawUVs.Count} UVs, {mesh.vertexCount} verts");

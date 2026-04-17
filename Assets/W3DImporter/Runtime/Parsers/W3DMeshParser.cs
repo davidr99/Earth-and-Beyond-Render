@@ -292,6 +292,12 @@ namespace W3DImporter.Parsers
                             case W3DChunkTypes.VERTEX_MATERIAL_INFO:
                                 vm.Info = ReadVertexMaterialInfo(reader);
                                 break;
+                            case W3DChunkTypes.VERTEX_MAPPER_ARGS0:
+                                vm.VmArgs0 = reader.ReadString((int)(sub.ChunkEnd - reader.Position));
+                                break;
+                            case W3DChunkTypes.VERTEX_MAPPER_ARGS1:
+                                vm.VmArgs1 = reader.ReadString((int)(sub.ChunkEnd - reader.Position));
+                                break;
                             default:
                                 chunks.SkipChunk(sub);
                                 break;
@@ -349,8 +355,10 @@ namespace W3DImporter.Parsers
                                 tex.Id = tex.File;
                                 break;
                             case W3DChunkTypes.TEXTURE_INFO:
-                                tex.TextureInfo = reader.ReadUInt32();
-                                reader.Skip(8);
+                                tex.TextureInfo = reader.ReadUInt16();
+                                tex.AnimType = reader.ReadUInt16();
+                                tex.FrameCount = reader.ReadUInt32();
+                                tex.FrameRate = reader.ReadFloat();
                                 break;
                             default:
                                 chunks.SkipChunk(sub);

@@ -93,6 +93,11 @@ namespace W3DImporter.Structs.Mesh
         public string Id = "";
         public string File = "";
         public uint TextureInfo;
+        public ushort AnimType;
+        public uint FrameCount = 1;
+        public float FrameRate;
+
+        public bool IsAnimated => FrameCount > 1;
     }
 
     public class W3DTextureStage
@@ -114,15 +119,25 @@ namespace W3DImporter.Structs.Mesh
         public List<Color32> Scg = new List<Color32>();
     }
 
-    // Geometry type flags
+    // W3D mesh header Attrs:
+    //   bits 0-15 are independent flag bits (HIDDEN, TWO_SIDED, CAST_SHADOW, etc.)
+    //   bits 16-23 hold an enum-valued geometry type, masked by GEOMETRY_TYPE_MASK.
+    // SKIN, CAMERA_ALIGNED and CAMERA_ORIENTED are mutually exclusive enum values,
+    // not OR-able bits — testing them with `& VALUE != 0` gives false positives
+    // because 0x60000 overlaps 0x20000.
     public static class GeometryFlags
     {
-        public const uint SKIN = 0x00020000;
         public const uint HIDDEN = 0x00001000;
         public const uint TWO_SIDED = 0x00002000;
         public const uint CAST_SHADOW = 0x00008000;
-        public const uint CAMERA_ALIGNED = 0x00010000;
-        public const uint CAMERA_ORIENTED = 0x00060000;
+
+        public const uint GEOMETRY_TYPE_MASK = 0x00FF0000;
+        public const uint GEOMETRY_TYPE_NORMAL = 0x00000000;
+        public const uint GEOMETRY_TYPE_CAMERA_ALIGNED = 0x00010000;
+        public const uint GEOMETRY_TYPE_SKIN = 0x00020000;
+        public const uint GEOMETRY_TYPE_AABOX = 0x00040000;
+        public const uint GEOMETRY_TYPE_OBBOX = 0x00050000;
+        public const uint GEOMETRY_TYPE_CAMERA_ORIENTED = 0x00060000;
     }
 
     public class W3DMesh
@@ -151,12 +166,13 @@ namespace W3DImporter.Structs.Mesh
         public W3DEffectPassDescription EffectPass => UserTextData?.EffectPass;
         public W3DSurfaceDescription Surface => UserTextData?.Surface;
 
-        public bool IsSkin => Header != null && (Header.Attrs & GeometryFlags.SKIN) != 0;
+        private uint GeometryType => (Header?.Attrs ?? 0) & GeometryFlags.GEOMETRY_TYPE_MASK;
+        public bool IsSkin => GeometryType == GeometryFlags.GEOMETRY_TYPE_SKIN;
+        public bool IsCameraAligned => GeometryType == GeometryFlags.GEOMETRY_TYPE_CAMERA_ALIGNED;
+        public bool IsCameraOriented => GeometryType == GeometryFlags.GEOMETRY_TYPE_CAMERA_ORIENTED;
         public bool IsTwoSided => Header != null && (Header.Attrs & GeometryFlags.TWO_SIDED) != 0;
         public bool IsHidden => Header != null && (Header.Attrs & GeometryFlags.HIDDEN) != 0;
         public bool CastsShadow => Header != null && (Header.Attrs & GeometryFlags.CAST_SHADOW) != 0;
-        public bool IsCameraAligned => Header != null && (Header.Attrs & GeometryFlags.CAMERA_ALIGNED) == GeometryFlags.CAMERA_ALIGNED;
-        public bool IsCameraOriented => Header != null && (Header.Attrs & GeometryFlags.CAMERA_ORIENTED) == GeometryFlags.CAMERA_ORIENTED;
         public bool EffectiveTwoSided => IsTwoSided || EffectPass?.TwoSided == true;
         public bool EffectiveHidden => IsHidden || EffectPass?.Hidden == true;
     }

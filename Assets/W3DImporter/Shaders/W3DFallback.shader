@@ -4,12 +4,22 @@ Shader "W3D/Standard"
     {
         _MainTex ("Texture", 2D) = "white" {}
         _Color ("Color", Color) = (1,1,1,1)
+        _EmissionColor ("Emission", Color) = (0,0,0,0)
+        [Toggle] _AlphaClip ("Alpha Clip", Float) = 0
+        _Cutoff ("Alpha Cutoff", Range(0,1)) = 0.5
+        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull", Float) = 2
+        [Enum(UnityEngine.Rendering.BlendMode)] _SrcBlend ("Src Blend", Float) = 1
+        [Enum(UnityEngine.Rendering.BlendMode)] _DstBlend ("Dst Blend", Float) = 0
+        [Toggle] _ZWrite ("ZWrite", Float) = 1
         [Toggle] _DebugUV ("Debug UVs", Float) = 0
     }
 
     SubShader
     {
         Tags { "RenderType"="Opaque" "Queue"="Geometry" }
+        Blend [_SrcBlend] [_DstBlend]
+        ZWrite [_ZWrite]
+        Cull [_Cull]
 
         Pass
         {
@@ -36,6 +46,9 @@ Shader "W3D/Standard"
             sampler2D _MainTex;
             float4 _MainTex_ST;
             fixed4 _Color;
+            fixed4 _EmissionColor;
+            float _AlphaClip;
+            float _Cutoff;
             float _DebugUV;
 
             v2f vert (appdata v)
@@ -59,8 +72,11 @@ Shader "W3D/Standard"
                 float light = dot(normalize(i.normal), float3(0.3, 0.8, 0.2)) * 0.4 + 0.6;
 
                 fixed4 col = tex * _Color;
+                if (_AlphaClip > 0.5)
+                    clip(col.a - _Cutoff);
                 col.rgb *= light;
-                return fixed4(col.rgb, 1.0);
+                col.rgb += _EmissionColor.rgb;
+                return col;
             }
             ENDCG
         }

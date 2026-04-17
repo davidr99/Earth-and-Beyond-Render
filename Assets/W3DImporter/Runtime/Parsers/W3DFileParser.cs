@@ -1,8 +1,10 @@
 using System.IO;
+using System.Collections.Generic;
 using UnityEngine;
 using W3DImporter.IO;
 using W3DImporter.Structs;
 using W3DImporter.Structs.CollisionBox;
+using W3DImporter.Structs.Animation;
 
 namespace W3DImporter.Parsers
 {
@@ -56,14 +58,28 @@ namespace W3DImporter.Parsers
                         break;
 
                     case W3DChunkTypes.ANIMATION:
-                        if (context.Animation == null && context.CompressedAnimation == null)
-                            context.Animation = W3DAnimationParser.Read(reader, chunks, chunk.ChunkEnd);
+                    {
+                        var animation = W3DAnimationParser.Read(reader, chunks, chunk.ChunkEnd);
+                        if (animation != null)
+                        {
+                            context.Animations.Add(animation);
+                            if (context.Animation == null && context.CompressedAnimation == null)
+                                context.Animation = animation;
+                        }
                         break;
+                    }
 
                     case W3DChunkTypes.COMPRESSED_ANIMATION:
-                        if (context.Animation == null && context.CompressedAnimation == null)
-                            context.CompressedAnimation = W3DCompressedAnimationParser.Read(reader, chunks, chunk.ChunkEnd);
+                    {
+                        var compressedAnimation = W3DCompressedAnimationParser.Read(reader, chunks, chunk.ChunkEnd);
+                        if (compressedAnimation != null)
+                        {
+                            context.CompressedAnimations.Add(compressedAnimation);
+                            if (context.Animation == null && context.CompressedAnimation == null)
+                                context.CompressedAnimation = compressedAnimation;
+                        }
                         break;
+                    }
 
                     case W3DChunkTypes.BOX:
                         context.CollisionBoxes.Add(ReadCollisionBox(reader));
@@ -97,6 +113,49 @@ namespace W3DImporter.Parsers
             box.Center = reader.ReadVector3();
             box.Extent = reader.ReadVector3();
             return box;
+        }
+
+        public static void CollectAnimations(string filePath, string hierarchyName, List<W3DAnimation> animations, List<W3DCompressedAnimation> compressedAnimations)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath) || string.IsNullOrWhiteSpace(hierarchyName))
+                return;
+
+            try
+            {
+                using var stream = File.OpenRead(filePath);
+                using var reader = new W3DBinaryReader(stream);
+                var chunks = new W3DChunkReader(reader);
+
+                while (reader.Position < stream.Length)
+                {
+                    var chunk = chunks.ReadChunkHeader();
+
+                    switch (chunk.ChunkType)
+                    {
+                        case W3DChunkTypes.ANIMATION:
+                        {
+                            var animation = W3DAnimationParser.Read(reader, chunks, chunk.ChunkEnd);
+                            if (animation?.Header != null && string.Equals(animation.Header.HierarchyName, hierarchyName, System.StringComparison.OrdinalIgnoreCase))
+                                animations.Add(animation);
+                            break;
+                        }
+
+                        case W3DChunkTypes.COMPRESSED_ANIMATION:
+                        {
+                            var compressedAnimation = W3DCompressedAnimationParser.Read(reader, chunks, chunk.ChunkEnd);
+                            if (compressedAnimation?.Header != null && string.Equals(compressedAnimation.Header.HierarchyName, hierarchyName, System.StringComparison.OrdinalIgnoreCase))
+                                compressedAnimations.Add(compressedAnimation);
+                            break;
+                        }
+                    }
+
+                    reader.Seek(chunk.ChunkEnd);
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[W3D] Skipping external animation scan for '{filePath}': {ex.Message}");
+            }
         }
     }
 }

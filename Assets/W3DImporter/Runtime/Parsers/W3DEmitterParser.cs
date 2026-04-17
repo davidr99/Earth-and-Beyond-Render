@@ -35,6 +35,12 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.EMITTER_PROPS:
                         emitter.Props = ReadEmitterProps(reader);
                         break;
+                    case W3DChunkTypes.EMITTER_ROTATION_KEYFRAMES:
+                        emitter.RotationData = ReadRotationKeyframes(reader, chunk.ChunkEnd);
+                        break;
+                    case W3DChunkTypes.EMITTER_FRAME_KEYFRAMES:
+                        emitter.FrameData = ReadFrameKeyframes(reader, chunk.ChunkEnd);
+                        break;
                     default:
                         // Skip line properties, keyframes, etc. for now
                         break;
@@ -119,6 +125,53 @@ namespace W3DImporter.Parsers
             }
 
             return props;
+        }
+
+        private static W3DEmitterRotationData ReadRotationKeyframes(W3DBinaryReader reader, long end)
+        {
+            var keyframeCount = reader.ReadUInt32();
+            var data = new W3DEmitterRotationData
+            {
+                Random = reader.ReadFloat(),
+                OrientationRandom = reader.ReadFloat()
+            };
+            reader.Skip(4); // reserved
+
+            int maxKeysFromChunk = (int)((end - reader.Position) / 8);
+            int keysToRead = keyframeCount > 0 ? System.Math.Min((int)keyframeCount + 1, maxKeysFromChunk) : maxKeysFromChunk;
+            for (int i = 0; i < keysToRead; i++)
+            {
+                data.Keyframes.Add(new W3DEmitterRotationKeyframe
+                {
+                    Time = reader.ReadFloat(),
+                    Rotation = reader.ReadFloat()
+                });
+            }
+
+            return data;
+        }
+
+        private static W3DEmitterFrameData ReadFrameKeyframes(W3DBinaryReader reader, long end)
+        {
+            var keyframeCount = reader.ReadUInt32();
+            var data = new W3DEmitterFrameData
+            {
+                Random = reader.ReadFloat()
+            };
+            reader.Skip(8); // reserved
+
+            int maxKeysFromChunk = (int)((end - reader.Position) / 8);
+            int keysToRead = keyframeCount > 0 ? System.Math.Min((int)keyframeCount + 1, maxKeysFromChunk) : maxKeysFromChunk;
+            for (int i = 0; i < keysToRead; i++)
+            {
+                data.Keyframes.Add(new W3DEmitterFrameKeyframe
+                {
+                    Time = reader.ReadFloat(),
+                    Frame = reader.ReadFloat()
+                });
+            }
+
+            return data;
         }
     }
 }

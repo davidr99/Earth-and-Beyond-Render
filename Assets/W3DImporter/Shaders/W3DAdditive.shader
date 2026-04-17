@@ -4,14 +4,16 @@ Shader "W3D/Additive"
     {
         _MainTex ("Texture", 2D) = "white" {}
         _Color ("Color", Color) = (1,1,1,1)
+        [Enum(UnityEngine.Rendering.CullMode)] _Cull ("Cull", Float) = 0
+        [Toggle] _ZWrite ("ZWrite", Float) = 0
     }
 
     SubShader
     {
         Tags { "RenderType"="Transparent" "Queue"="Transparent+100" "IgnoreProjector"="True" }
         Blend SrcAlpha One
-        ZWrite Off
-        Cull Off
+        ZWrite [_ZWrite]
+        Cull [_Cull]
 
         Pass
         {

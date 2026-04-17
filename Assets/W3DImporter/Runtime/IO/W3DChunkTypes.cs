@@ -41,6 +41,8 @@ namespace W3DImporter.IO
         public const uint VERTEX_MATERIAL = 0x0000002B;
         public const uint VERTEX_MATERIAL_NAME = 0x0000002C;
         public const uint VERTEX_MATERIAL_INFO = 0x0000002D;
+        public const uint VERTEX_MAPPER_ARGS0 = 0x0000002E;
+        public const uint VERTEX_MAPPER_ARGS1 = 0x0000002F;
         public const uint TEXTURES = 0x00000030;
         public const uint TEXTURE = 0x00000031;
         public const uint TEXTURE_NAME = 0x00000032;

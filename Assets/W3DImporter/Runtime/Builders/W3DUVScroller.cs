@@ -25,7 +25,7 @@ namespace W3DImporter.Builders
                 return;
 
             float range = EndV - StartV;
-            float v = StartV + Mathf.Repeat(Time.time / CycleTime, 1f) * range;
+            float v = StartV + Mathf.Repeat(Time.realtimeSinceStartup / CycleTime, 1f) * range;
             var offset = new Vector2(0f, v);
 
             for (int i = 0; i < materials.Length; i++)
@@ -34,6 +34,10 @@ namespace W3DImporter.Builders
                 if (mat == null)
                     continue;
 
+                if (mat.HasProperty("_UnlitColorMap"))
+                    mat.SetTextureOffset("_UnlitColorMap", offset);
+                if (mat.HasProperty("_BaseColorMap"))
+                    mat.SetTextureOffset("_BaseColorMap", offset);
                 if (mat.HasProperty("_MainTex"))
                     mat.SetTextureOffset("_MainTex", offset);
                 if (mat.HasProperty("_BaseMap"))

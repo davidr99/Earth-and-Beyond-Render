@@ -1,5 +1,6 @@
 using System.IO;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using UnityEngine;
 
 namespace W3DImporter.Builders
@@ -7,8 +8,11 @@ namespace W3DImporter.Builders
     public class W3DTextureResolver
     {
         private static readonly string[] Extensions = { ".png", ".jpg", ".jpeg", ".dds", ".tga", ".bmp" };
+        private static readonly Regex TrailingDigitsRegex = new Regex(@"^(.*?)(\d+)$", RegexOptions.Compiled);
         private readonly string _baseDirectory;
         private readonly Dictionary<string, Texture2D> _cache = new Dictionary<string, Texture2D>();
+        private readonly Dictionary<string, Texture2D[]> _animationCache = new Dictionary<string, Texture2D[]>();
+        private readonly HashSet<string> _missingTextures = new HashSet<string>();
 
         public W3DTextureResolver(string baseDirectory)
         {
@@ -33,6 +37,7 @@ namespace W3DImporter.Builders
                     var tex = LoadTexture(fullPath);
                     if (tex != null)
                     {
+                        _missingTextures.Remove(baseName);
                         _cache[baseName] = tex;
                         return tex;
                     }
@@ -40,9 +45,60 @@ namespace W3DImporter.Builders
             }
 
             Debug.LogWarning($"[W3D] Texture not found: {baseName} in {_baseDirectory}");
+            _missingTextures.Add(baseName);
             var fallback = CreateFallbackTexture(baseName);
             _cache[baseName] = fallback;
             return fallback;
+        }
+
+        public Texture2D[] ResolveAnimation(string filename, uint frameCount)
+        {
+            if (string.IsNullOrWhiteSpace(filename) || frameCount <= 1)
+                return null;
+
+            string baseName = Path.GetFileNameWithoutExtension(filename).ToLowerInvariant();
+            string cacheKey = baseName + "|" + frameCount;
+            if (_animationCache.TryGetValue(cacheKey, out var cached))
+                return cached;
+
+            if (!TrailingDigitsRegex.IsMatch(baseName))
+            {
+                _animationCache[cacheKey] = null;
+                return null;
+            }
+
+            var frames = new List<Texture2D>();
+            for (int i = 0; i < frameCount; i++)
+            {
+                string frameName = BuildFrameName(baseName, i);
+                var frame = Resolve(frameName);
+                if (frame == null || _missingTextures.Contains(frameName))
+                    break;
+
+                frames.Add(frame);
+            }
+
+            if (frames.Count <= 1)
+            {
+                _animationCache[cacheKey] = null;
+                return null;
+            }
+
+            var result = frames.ToArray();
+            _animationCache[cacheKey] = result;
+            return result;
+        }
+
+        private static string BuildFrameName(string baseName, int offset)
+        {
+            var match = TrailingDigitsRegex.Match(baseName);
+            if (!match.Success)
+                return baseName;
+
+            string prefix = match.Groups[1].Value;
+            string digits = match.Groups[2].Value;
+            int startValue = int.Parse(digits);
+            return prefix + (startValue + offset).ToString("D" + digits.Length);
         }
 
         private Texture2D LoadTexture(string path)
@@ -58,6 +114,8 @@ namespace W3DImporter.Builders
                     if (tex.LoadImage(data))
                     {
                         tex.name = Path.GetFileNameWithoutExtension(path);
+                        tex.wrapMode = TextureWrapMode.Repeat;
+                        tex.filterMode = FilterMode.Bilinear;
                         Debug.Log($"[W3D] Loaded: {path}");
                         return tex;
                     }
@@ -174,6 +232,8 @@ namespace W3DImporter.Builders
             }
             tex.SetPixels32(pixels);
             tex.Apply(true);
+            tex.wrapMode = TextureWrapMode.Repeat;
+            tex.filterMode = FilterMode.Bilinear;
             Debug.Log($"[W3D] Loaded DDS (24-bit): {path} ({width}x{height})");
             return tex;
         }
@@ -391,6 +451,8 @@ namespace W3DImporter.Builders
 
             tex.SetPixels32(pixels);
             tex.Apply(true);
+            tex.wrapMode = TextureWrapMode.Repeat;
+            tex.filterMode = FilterMode.Bilinear;
             Debug.Log($"[W3D] Loaded TGA: {path} ({width}x{height})");
             return tex;
         }
