@@ -1,0 +1,14 @@
+{
+    "name": "W3DImporter.Editor",
+    "rootNamespace": "W3DImporter.Editor",
+    "references": ["W3DImporter.Runtime"],
+    "includePlatforms": ["Editor"],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
