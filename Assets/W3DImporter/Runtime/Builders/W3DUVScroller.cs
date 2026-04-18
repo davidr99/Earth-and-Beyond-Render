@@ -2,6 +2,7 @@ using UnityEngine;
 
 namespace W3DImporter.Builders
 {
+    [ExecuteAlways]
     public sealed class W3DUVScroller : MonoBehaviour
     {
         public float CycleTime = 1f;
@@ -15,7 +16,33 @@ namespace W3DImporter.Builders
             _renderer = GetComponent<Renderer>();
         }
 
+        private void OnEnable()
+        {
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                UnityEditor.EditorApplication.update -= EditorUpdate;
+                UnityEditor.EditorApplication.update += EditorUpdate;
+            }
+#endif
+            if (_renderer == null)
+                _renderer = GetComponent<Renderer>();
+        }
+
+        private void OnDisable()
+        {
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.update -= EditorUpdate;
+#endif
+        }
+
         private void Update()
+        {
+            if (Application.isPlaying)
+                Tick();
+        }
+
+        private void Tick()
         {
             if (_renderer == null || CycleTime <= 0.0001f)
                 return;
@@ -44,5 +71,19 @@ namespace W3DImporter.Builders
                     mat.SetTextureOffset("_BaseMap", offset);
             }
         }
+
+#if UNITY_EDITOR
+        private void EditorUpdate()
+        {
+            if (Application.isPlaying || this == null || !isActiveAndEnabled)
+                return;
+
+            if (_renderer == null)
+                _renderer = GetComponent<Renderer>();
+
+            Tick();
+            UnityEditor.SceneView.RepaintAll();
+        }
+#endif
     }
 }

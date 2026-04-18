@@ -119,6 +119,44 @@ namespace W3DImporter.Structs.Mesh
         public List<Color32> Scg = new List<Color32>();
     }
 
+    public static class W3DShaderMaterialPropertyType
+    {
+        public const int String = 1;
+        public const int Float = 2;
+        public const int Vec2 = 3;
+        public const int Vec3 = 4;
+        public const int Vec4 = 5;
+        public const int Int = 6;
+        public const int Bool = 7;
+    }
+
+    public class W3DShaderMaterialProperty
+    {
+        public int Type;
+        public string Name = "";
+        public string StringValue = "";
+        public float FloatValue;
+        public int IntValue;
+        public bool BoolValue;
+        public Vector4 VectorValue = Vector4.zero;
+
+        public bool TryGetVector4(out Vector4 value)
+        {
+            value = VectorValue;
+            return Type == W3DShaderMaterialPropertyType.Vec4
+                || Type == W3DShaderMaterialPropertyType.Vec3
+                || Type == W3DShaderMaterialPropertyType.Vec2;
+        }
+    }
+
+    public class W3DShaderMaterial
+    {
+        public byte Version;
+        public string TypeName = "";
+        public int Technique;
+        public List<W3DShaderMaterialProperty> Properties = new List<W3DShaderMaterialProperty>();
+    }
+
     // W3D mesh header Attrs:
     //   bits 0-15 are independent flag bits (HIDDEN, TWO_SIDED, CAST_SHADOW, etc.)
     //   bits 16-23 hold an enum-valued geometry type, masked by GEOMETRY_TYPE_MASK.
@@ -158,6 +196,7 @@ namespace W3DImporter.Structs.Mesh
         public List<W3DVertexMaterial> VertMaterials = new List<W3DVertexMaterial>();
         public List<W3DTexture> Textures = new List<W3DTexture>();
         public List<W3DMaterialPass> MaterialPasses = new List<W3DMaterialPass>();
+        public List<W3DShaderMaterial> ShaderMaterials = new List<W3DShaderMaterial>();
         public List<Color32> DirectVertexColors = new List<Color32>();
         public W3DUserTextData UserTextData;
 

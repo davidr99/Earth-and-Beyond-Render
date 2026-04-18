@@ -52,6 +52,8 @@ namespace W3DImporter.Builders
 
             if (context.HLod != null)
             {
+                ZeroBillboardOnlyBoneRotations(context, boneTransforms);
+
                 bool hasMultipleLods = context.HLod.LodArrays.Count > 1;
 
                 if (hasMultipleLods)
@@ -225,9 +227,21 @@ namespace W3DImporter.Builders
             if (clips.Count == 0)
                 return;
 
-            var animation = root.GetComponent<Animation>() ?? root.AddComponent<Animation>();
+            if (!root.TryGetComponent<Animation>(out var animation) || animation == null)
+                animation = root.AddComponent<Animation>();
+
+            if (animation == null)
+            {
+                Debug.LogWarning($"[W3D] Unable to attach Animation component to '{root.name}'; skipping {clips.Count} clip(s)");
+                return;
+            }
+
             for (int i = 0; i < clips.Count; i++)
+            {
+                if (clips[i] == null)
+                    continue;
                 animation.AddClip(clips[i], clips[i].name);
+            }
 
             animation.clip = clips[0];
             animation.wrapMode = WrapMode.Loop;
@@ -255,6 +269,58 @@ namespace W3DImporter.Builders
             var clip = W3DCompressedAnimationBuilder.Build(animationData, hierarchy);
             if (clip != null && clipNames.Add(clip.name))
                 clips.Add(clip);
+        }
+
+        // W3D runtime discards pivot rotation for CAMERA_ALIGNED / CAMERA_ORIENTED meshes
+        // (Renegade dx8renderer.cpp Obj_Look_At replaces rotation at render time, keeping only
+        // the pivot's world position). Unity inherits the authored pivot rotation through
+        // transform.parent, so in edit mode and in play mode before the first LateUpdate the
+        // billboard renders with whatever 180° Z etc. the artist baked into the pivot. Zeroing
+        // localRotation on bones that exclusively host billboard meshes matches runtime semantics
+        // without disturbing translation or any unrelated non-billboard children on the same bone.
+        private void ZeroBillboardOnlyBoneRotations(W3DDataContext context, Dictionary<int, Transform> boneTransforms)
+        {
+            var boneHasBillboard = new HashSet<int>();
+            var boneHasNonBillboard = new HashSet<int>();
+
+            foreach (var lodArray in context.HLod.LodArrays)
+            {
+                foreach (var subObj in lodArray.SubObjects)
+                {
+                    if (string.IsNullOrEmpty(subObj.Name) || subObj.Name == "NULL")
+                        continue;
+
+                    W3DMesh matched = null;
+                    foreach (var mesh in context.Meshes)
+                    {
+                        if (mesh.Name == subObj.Name)
+                        {
+                            matched = mesh;
+                            break;
+                        }
+                    }
+                    if (matched == null)
+                        continue;
+
+                    if (matched.IsCameraAligned || matched.IsCameraOriented)
+                        boneHasBillboard.Add(subObj.BoneIndex);
+                    else
+                        boneHasNonBillboard.Add(subObj.BoneIndex);
+                }
+            }
+
+            foreach (int boneIndex in boneHasBillboard)
+            {
+                if (boneHasNonBillboard.Contains(boneIndex))
+                    continue;
+                if (!boneTransforms.TryGetValue(boneIndex, out var bone))
+                    continue;
+                if (bone == null || bone.localRotation == Quaternion.identity)
+                    continue;
+
+                Debug.Log($"[W3D Billboard] Zeroing localRotation on bone '{bone.name}' (hosts only billboard meshes)");
+                bone.localRotation = Quaternion.identity;
+            }
         }
 
         private void BuildHierarchy(W3DHierarchy hierarchy, Transform root, Dictionary<int, Transform> boneMap)

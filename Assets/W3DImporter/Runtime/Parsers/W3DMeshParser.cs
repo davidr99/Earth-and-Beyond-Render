@@ -67,6 +67,9 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.TEXTURES:
                         mesh.Textures = ReadTextures(reader, chunks, chunk.ChunkEnd);
                         break;
+                    case W3DChunkTypes.SHADER_MATERIALS:
+                        mesh.ShaderMaterials = ReadShaderMaterials(reader, chunks, chunk.ChunkEnd);
+                        break;
                     case W3DChunkTypes.MATERIAL_PASS:
                         mesh.MaterialPasses.Add(ReadMaterialPass(reader, chunks, chunk.ChunkEnd));
                         break;
@@ -452,6 +455,102 @@ namespace W3DImporter.Parsers
                 reader.Seek(chunk.ChunkEnd);
             }
             return stage;
+        }
+
+        private static List<W3DShaderMaterial> ReadShaderMaterials(W3DBinaryReader reader, W3DChunkReader chunks, long end)
+        {
+            var list = new List<W3DShaderMaterial>();
+            foreach (var chunk in chunks.EnumerateChunks(end))
+            {
+                if (chunk.ChunkType == W3DChunkTypes.SHADER_MATERIAL)
+                    list.Add(ReadShaderMaterial(reader, chunks, chunk.ChunkEnd));
+                else
+                    chunks.SkipChunk(chunk);
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+
+            return list;
+        }
+
+        private static W3DShaderMaterial ReadShaderMaterial(W3DBinaryReader reader, W3DChunkReader chunks, long end)
+        {
+            var material = new W3DShaderMaterial();
+            foreach (var chunk in chunks.EnumerateChunks(end))
+            {
+                switch (chunk.ChunkType)
+                {
+                    case W3DChunkTypes.SHADER_MATERIAL_HEADER:
+                        material.Version = reader.ReadByte();
+                        material.TypeName = reader.ReadLongFixedString();
+                        material.Technique = reader.ReadInt32();
+                        break;
+                    case W3DChunkTypes.SHADER_MATERIAL_PROPERTY:
+                        material.Properties.Add(ReadShaderMaterialProperty(reader));
+                        break;
+                    default:
+                        chunks.SkipChunk(chunk);
+                        break;
+                }
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+
+            return material;
+        }
+
+        private static W3DShaderMaterialProperty ReadShaderMaterialProperty(W3DBinaryReader reader)
+        {
+            var property = new W3DShaderMaterialProperty
+            {
+                Type = reader.ReadInt32()
+            };
+
+            int nameLength = reader.ReadInt32();
+            property.Name = reader.ReadString(nameLength);
+
+            switch (property.Type)
+            {
+                case W3DShaderMaterialPropertyType.String:
+                {
+                    int valueLength = reader.ReadInt32();
+                    property.StringValue = reader.ReadString(valueLength);
+                    break;
+                }
+                case W3DShaderMaterialPropertyType.Float:
+                    property.FloatValue = reader.ReadFloat();
+                    break;
+                case W3DShaderMaterialPropertyType.Vec2:
+                {
+                    var value = reader.ReadVector2();
+                    property.VectorValue = new Vector4(value.x, value.y, 0f, 0f);
+                    break;
+                }
+                case W3DShaderMaterialPropertyType.Vec3:
+                {
+                    var value = reader.ReadVector3();
+                    property.VectorValue = new Vector4(value.x, value.y, value.z, 0f);
+                    break;
+                }
+                case W3DShaderMaterialPropertyType.Vec4:
+                {
+                    var value = reader.ReadBytes(16);
+                    property.VectorValue = new Vector4(
+                        System.BitConverter.ToSingle(value, 0),
+                        System.BitConverter.ToSingle(value, 4),
+                        System.BitConverter.ToSingle(value, 8),
+                        System.BitConverter.ToSingle(value, 12));
+                    break;
+                }
+                case W3DShaderMaterialPropertyType.Int:
+                    property.IntValue = reader.ReadInt32();
+                    break;
+                case W3DShaderMaterialPropertyType.Bool:
+                    property.BoolValue = reader.ReadByte() != 0;
+                    break;
+            }
+
+            return property;
         }
     }
 }

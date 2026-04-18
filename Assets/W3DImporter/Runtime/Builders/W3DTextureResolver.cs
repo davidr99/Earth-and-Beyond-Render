@@ -429,32 +429,103 @@ namespace W3DImporter.Builders
             byte[] data = File.ReadAllBytes(path);
             if (data.Length < 18) return null;
 
+            int idLength = data[0];
+            int imageType = data[2];
             int width = data[12] | (data[13] << 8);
             int height = data[14] | (data[15] << 8);
             int bpp = data[16];
-            int dataOffset = 18 + data[0];
+            int descriptor = data[17];
+            int bytesPerPixel = bpp / 8;
+            int dataOffset = 18 + idLength;
+
+            if (width <= 0 || height <= 0)
+                return null;
+
+            if ((imageType != 2 && imageType != 10) || (bytesPerPixel != 3 && bytesPerPixel != 4))
+            {
+                Debug.LogWarning($"[W3D] Unsupported TGA format: {path} (type={imageType} bpp={bpp})");
+                return null;
+            }
 
             var tex = new Texture2D(width, height, TextureFormat.RGBA32, false);
             tex.name = Path.GetFileNameWithoutExtension(path);
 
             var pixels = new Color32[width * height];
+            bool topOrigin = (descriptor & 0x20) != 0;
+            bool rightOrigin = (descriptor & 0x10) != 0;
             int idx = dataOffset;
+            int pixelIndex = 0;
+            int pixelCount = width * height;
 
-            for (int i = 0; i < width * height && idx < data.Length - 2; i++)
+            while (pixelIndex < pixelCount && idx < data.Length)
             {
-                byte b = data[idx++];
-                byte g = data[idx++];
-                byte r = data[idx++];
-                byte a = bpp == 32 && idx < data.Length ? data[idx++] : (byte)255;
-                pixels[i] = new Color32(r, g, b, a);
+                int runLength = 1;
+                bool isRlePacket = false;
+
+                if (imageType == 10)
+                {
+                    byte packetHeader = data[idx++];
+                    isRlePacket = (packetHeader & 0x80) != 0;
+                    runLength = (packetHeader & 0x7F) + 1;
+                }
+
+                if (isRlePacket)
+                {
+                    if (idx + bytesPerPixel > data.Length)
+                        break;
+
+                    var color = ReadTgaColor(data, ref idx, bytesPerPixel);
+                    for (int i = 0; i < runLength && pixelIndex < pixelCount; i++, pixelIndex++)
+                        WriteTgaPixel(pixels, width, height, pixelIndex, color, topOrigin, rightOrigin);
+                }
+                else
+                {
+                    for (int i = 0; i < runLength && pixelIndex < pixelCount; i++, pixelIndex++)
+                    {
+                        if (idx + bytesPerPixel > data.Length)
+                            break;
+
+                        var color = ReadTgaColor(data, ref idx, bytesPerPixel);
+                        WriteTgaPixel(pixels, width, height, pixelIndex, color, topOrigin, rightOrigin);
+                    }
+                }
             }
 
             tex.SetPixels32(pixels);
             tex.Apply(true);
             tex.wrapMode = TextureWrapMode.Repeat;
             tex.filterMode = FilterMode.Bilinear;
-            Debug.Log($"[W3D] Loaded TGA: {path} ({width}x{height})");
+            Debug.Log($"[W3D] Loaded TGA: {path} ({width}x{height} type={imageType} bpp={bpp})");
             return tex;
+        }
+
+        private static Color32 ReadTgaColor(byte[] data, ref int idx, int bytesPerPixel)
+        {
+            byte b = data[idx++];
+            byte g = data[idx++];
+            byte r = data[idx++];
+            byte a = bytesPerPixel >= 4 ? data[idx++] : (byte)255;
+            return new Color32(r, g, b, a);
+        }
+
+        private static void WriteTgaPixel(
+            Color32[] pixels,
+            int width,
+            int height,
+            int sourceIndex,
+            Color32 color,
+            bool topOrigin,
+            bool rightOrigin)
+        {
+            int x = sourceIndex % width;
+            int y = sourceIndex / width;
+
+            if (!topOrigin)
+                y = (height - 1) - y;
+            if (rightOrigin)
+                x = (width - 1) - x;
+
+            pixels[y * width + x] = color;
         }
 
         private string FindCaseInsensitive(string directory, string filename)
