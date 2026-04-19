@@ -676,7 +676,7 @@ namespace W3DImporter.Builders
                     if (i < w3dMesh.DirectUVs.Count)
                     {
                         var uv = w3dMesh.DirectUVs[i];
-                        directUVs[i] = new Vector2(uv.x, 1f - uv.y);
+                        directUVs[i] = new Vector2(1f - uv.x, 1f - uv.y);
                     }
                     else
                     {
@@ -731,7 +731,7 @@ namespace W3DImporter.Builders
             for (int i = 0; i < mesh.vertexCount; i++)
             {
                 if (i < rawUVs.Count)
-                    finalUVs[i] = new Vector2(rawUVs[i].x, 1f - rawUVs[i].y);
+                    finalUVs[i] = new Vector2(1f - rawUVs[i].x, 1f - rawUVs[i].y);
                 else
                     finalUVs[i] = Vector2.zero;
             }
@@ -754,7 +754,7 @@ namespace W3DImporter.Builders
                         if (i < txCoords2.Count)
                         {
                             var uv = txCoords2[i];
-                            uv2[i] = new Vector2(uv.x, 1f - uv.y);
+                            uv2[i] = new Vector2(1f - uv.x, 1f - uv.y);
                         }
                         else
                         {

@@ -7,32 +7,15 @@ namespace W3DImporter.Builders
 {
     public static class W3DMaterialBuilder
     {
+        private const bool EnableMaterialDiagnostics = false;
+        private const uint TextureAttributeAlphaBitmap = 0x0020u;
+        private const uint TextureHintMask = 0xFF00u;
+        private const uint TextureHintEmissive = 0x0100u;
+
         private static Shader _litShader;
         private static Shader _transparentShader;
         private static Shader _additiveShader;
-        private static Shader _vertexColorShader;
-
-        private static Shader VertexColorShader
-        {
-            get
-            {
-                if (_vertexColorShader != null) return _vertexColorShader;
-                _vertexColorShader = Shader.Find("W3D/UnlitVertexColor");
-                if (_vertexColorShader == null)
-                    Debug.LogWarning("[W3D] 'W3D/UnlitVertexColor' shader not found; falling back to the legacy W3D/HDRP material path.");
-                return _vertexColorShader;
-            }
-        }
-
-        private static bool IsW3DCustomShader(Shader shader)
-        {
-            return shader != null && !string.IsNullOrEmpty(shader.name) && shader.name.StartsWith("W3D/", StringComparison.Ordinal);
-        }
-
-        private static bool IsVertexColorShader(Shader shader)
-        {
-            return shader != null && string.Equals(shader.name, "W3D/UnlitVertexColor", StringComparison.Ordinal);
-        }
+        private static Shader _particleShader;
 
         private static bool MeshHasTintedDcg(W3DMesh w3dMesh)
         {
@@ -59,7 +42,7 @@ namespace W3DImporter.Builders
                 if (_litShader != null) return _litShader;
 
                 string[] shaderNames = {
-                    "W3D/Standard",
+                    "W3D/Opaque",
                     "HDRP/Unlit",
                     "Unlit/Texture",
                     "Sprites/Default"
@@ -87,7 +70,7 @@ namespace W3DImporter.Builders
                 if (_transparentShader != null) return _transparentShader;
 
                 string[] shaderNames = {
-                    "W3D/Standard",
+                    "W3D/Transparent",
                     "HDRP/Unlit",
                     "Sprites/Default",
                     "Unlit/Transparent",
@@ -113,7 +96,7 @@ namespace W3DImporter.Builders
 
                 string[] shaderNames = {
                     "W3D/Additive",
-                    "W3D/Standard",
+                    "W3D/Transparent",
                     "HDRP/Unlit",
                     "Sprites/Default",
                     "Unlit/Transparent",
@@ -135,6 +118,36 @@ namespace W3DImporter.Builders
             }
         }
 
+        private static Shader ParticleShader
+        {
+            get
+            {
+                if (_particleShader != null) return _particleShader;
+
+                string[] shaderNames = {
+                    "W3D/Particle",
+                    "W3D/Transparent",
+                    "HDRP/Unlit",
+                    "Sprites/Default",
+                    "Unlit/Transparent",
+                    "Unlit/Texture"
+                };
+
+                foreach (var name in shaderNames)
+                {
+                    _particleShader = Shader.Find(name);
+                    if (_particleShader != null)
+                    {
+                        Debug.Log($"[W3D] Using particle/screen shader: {name}");
+                        return _particleShader;
+                    }
+                }
+
+                _particleShader = TransparentShader;
+                return _particleShader;
+            }
+        }
+
         public static Material[] Build(W3DMesh w3dMesh, W3DTextureResolver textureResolver)
         {
             if (w3dMesh.EffectPass != null || w3dMesh.Surface != null)
@@ -149,16 +162,13 @@ namespace W3DImporter.Builders
         private static Material[] BuildFromVertexMaterials(W3DMesh w3dMesh, W3DTextureResolver textureResolver)
         {
             var materials = new Material[Mathf.Max(1, w3dMesh.VertMaterials.Count)];
+            bool useVertexColor = MeshHasTintedDcg(w3dMesh);
 
             for (int i = 0; i < w3dMesh.VertMaterials.Count; i++)
             {
                 var vm = w3dMesh.VertMaterials[i];
 
-                // Pick shader up front: DCG meshes (e.g. GLOW25's blue vertex) need the
-                // vertex-color variant so per-vertex tint actually reaches the pixel.
-                bool useVertexColor = MeshHasTintedDcg(w3dMesh) && VertexColorShader != null;
-                var initialShader = useVertexColor ? VertexColorShader : LitShader;
-                var mat = new Material(initialShader);
+                var mat = new Material(LitShader);
                 mat.name = w3dMesh.Name + "." + vm.Name;
                 SetOpaque(mat);
 
@@ -183,14 +193,16 @@ namespace W3DImporter.Builders
                 var texInfo = primaryTextureIndex >= 0 && primaryTextureIndex < w3dMesh.Textures.Count
                     ? w3dMesh.Textures[primaryTextureIndex].TextureInfo
                     : 0u;
-                Debug.Log($"[W3D MatDiag] '{mat.name}': vertMats={w3dMesh.VertMaterials.Count} shaders={w3dMesh.Shaders.Count} texInfo=0x{texInfo:X8} (blendMode={(texInfo >> 6) & 0x3} hasAlpha={(texInfo & 0x10u) != 0}) effectPass={(w3dMesh.EffectPass != null ? w3dMesh.EffectPass.EffectPassType.ToString() : "null")}");
+                if (EnableMaterialDiagnostics)
+                    Debug.Log($"[W3D MatDiag] '{mat.name}': vertMats={w3dMesh.VertMaterials.Count} shaders={w3dMesh.Shaders.Count} texInfo=0x{texInfo:X8} (hasAlphaBitmap={(texInfo & TextureAttributeAlphaBitmap) != 0} emissiveHint={(texInfo & TextureHintMask) == TextureHintEmissive}) effectPass={(w3dMesh.EffectPass != null ? w3dMesh.EffectPass.EffectPassType.ToString() : "null")}");
 
                 // Texture-driven classification first — TextureInfo bits reliably flag
                 // glow/flare textures as additive even when the W3DShader blend state
                 // says standard alpha. Only fall back to shader-state classification if
                 // the texture doesn't provide a verdict.
                 bool blendApplied = ApplyTextureDrivenBlendMode(mat, w3dMesh, i);
-                Debug.Log($"[W3D MatDiag] '{mat.name}': textureDriven={blendApplied}, shaderAfter='{mat.shader?.name}'");
+                if (EnableMaterialDiagnostics)
+                    Debug.Log($"[W3D MatDiag] '{mat.name}': textureDriven={blendApplied}, shaderAfter='{mat.shader?.name}'");
 
                 var resolvedShader = W3DTextureAnimationResolver.ResolveShader(w3dMesh, i);
                 if (!blendApplied && resolvedShader != null)
@@ -209,11 +221,13 @@ namespace W3DImporter.Builders
                 }
                 else if (!blendApplied)
                 {
-                    Debug.Log($"[W3D MatDiag] '{mat.name}': no Shaders chunk parsed — cannot fall back to W3DShader blend-state classification");
+                    if (EnableMaterialDiagnostics)
+                        Debug.Log($"[W3D MatDiag] '{mat.name}': no Shaders chunk parsed — cannot fall back to W3DShader blend-state classification");
                 }
 
                 ApplyMeshFlags(mat, w3dMesh);
                 ApplySecondaryTextureStage(mat, w3dMesh, i, textureResolver);
+                SetUseVertexColor(mat, useVertexColor);
                 materials[i] = mat;
             }
 
@@ -225,11 +239,8 @@ namespace W3DImporter.Builders
             var effect = w3dMesh.EffectPass;
             var surface = w3dMesh.Surface;
 
-            Shader shader = LitShader;
-            if (effect != null && effect.EffectPassType == 2)
-                shader = AdditiveShader;
-            if (MeshHasTintedDcg(w3dMesh) && VertexColorShader != null)
-                shader = VertexColorShader;
+            bool useVertexColor = MeshHasTintedDcg(w3dMesh);
+            Shader shader = effect != null && effect.EffectPassType == 2 ? AdditiveShader : LitShader;
 
             var mat = new Material(shader);
             mat.name = string.IsNullOrEmpty(effect?.Shader)
@@ -254,6 +265,7 @@ namespace W3DImporter.Builders
                 ApplyTextureDrivenBlendMode(mat, w3dMesh, 0, baseTextureName);
 
             ApplyMeshFlags(mat, w3dMesh);
+            SetUseVertexColor(mat, useVertexColor);
             return new[] { mat };
         }
 
@@ -414,7 +426,7 @@ namespace W3DImporter.Builders
             // Pre-multiplied alpha (glass, decals): Src=ONE + Dst=ONE_MINUS_SRC_ALPHA
             if (src == SRC_ONE && dst == DST_ONE_MINUS_SRC_ALPHA)
             {
-                SetTransparent(mat);
+                SetTransparent(mat, BlendMode.One, BlendMode.OneMinusSrcAlpha, true);
                 ApplyDepthState(mat, shader);
                 return true;
             }
@@ -422,7 +434,7 @@ namespace W3DImporter.Builders
             // Standard alpha: Src=SRC_ALPHA + Dst=ONE_MINUS_SRC_ALPHA
             if (src == SRC_SRC_ALPHA && dst == DST_ONE_MINUS_SRC_ALPHA)
             {
-                SetTransparent(mat);
+                SetTransparent(mat, BlendMode.SrcAlpha, BlendMode.OneMinusSrcAlpha, false);
                 ApplyDepthState(mat, shader);
                 return true;
             }
@@ -466,12 +478,16 @@ namespace W3DImporter.Builders
         private static void SetMultiplicative(Material mat)
         {
             var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
             var color = GetMaterialColor(mat);
+            var emissive = GetMaterialEmissive(mat);
 
-            if (!IsW3DCustomShader(mat.shader) && TransparentShader != null && mat.shader != TransparentShader)
-                mat.shader = TransparentShader;
+            var targetShader = ParticleShader != null ? ParticleShader : TransparentShader;
+            if (targetShader != null && mat.shader != targetShader)
+                mat.shader = targetShader;
 
-            RestoreMaterialState(mat, mainTexture, color);
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
 
             if (mat.HasProperty("_SrcBlend"))
                 mat.SetFloat("_SrcBlend", (float)BlendMode.DstColor);
@@ -483,7 +499,9 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_AlphaClip", 0f);
             if (mat.HasProperty("_AlphaCutoffEnable"))
                 mat.SetFloat("_AlphaCutoffEnable", 0f);
+            SetPremultiplyAlpha(mat, false);
             SetLightingEnabled(mat, false);
+            SetDefaultCullMode(mat);
 
             mat.renderQueue = 3000;
             mat.SetOverrideTag("RenderType", "Transparent");
@@ -515,6 +533,7 @@ namespace W3DImporter.Builders
         {
             string textureName = explicitTextureName;
             W3DTexture textureInfo = null;
+            var shader = W3DTextureAnimationResolver.ResolveShader(w3dMesh, matIndex);
 
             if (!string.IsNullOrWhiteSpace(textureName))
                 textureName = NormalizeTextureName(textureName);
@@ -548,18 +567,18 @@ namespace W3DImporter.Builders
             if (textureInfo == null)
                 return false;
 
-            int blendMode = (int)((textureInfo.TextureInfo >> 6) & 0x3u);
-            bool hasAlpha = (textureInfo.TextureInfo & 0x10u) != 0;
+            bool hasAlphaBitmap = (textureInfo.TextureInfo & TextureAttributeAlphaBitmap) != 0;
+            bool emissiveHint = (textureInfo.TextureInfo & TextureHintMask) == TextureHintEmissive;
 
-            if (blendMode >= 2)
+            if (emissiveHint)
             {
                 SetAdditive(mat);
                 return true;
             }
 
-            if (hasAlpha || blendMode == 1)
+            if (shader == null && hasAlphaBitmap)
             {
-                SetTransparent(mat);
+                SetTransparent(mat, BlendMode.SrcAlpha, BlendMode.OneMinusSrcAlpha, false);
                 return true;
             }
 
@@ -649,15 +668,22 @@ namespace W3DImporter.Builders
                 || textureName.Contains("LENS", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void SetTransparent(Material mat)
+        private static void SetTransparent(
+            Material mat,
+            BlendMode srcBlend = BlendMode.SrcAlpha,
+            BlendMode dstBlend = BlendMode.OneMinusSrcAlpha,
+            bool premultiplyAlpha = false)
         {
             var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
             var color = GetMaterialColor(mat);
+            var emissive = GetMaterialEmissive(mat);
 
-            if (!IsVertexColorShader(mat.shader) && TransparentShader != null && mat.shader != TransparentShader)
+            if (TransparentShader != null && mat.shader != TransparentShader)
                 mat.shader = TransparentShader;
 
-            RestoreMaterialState(mat, mainTexture, color);
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
 
             if (mat.HasProperty("_SurfaceType"))
                 mat.SetFloat("_SurfaceType", 1f);
@@ -678,14 +704,16 @@ namespace W3DImporter.Builders
             if (mat.HasProperty("_Mode"))
                 mat.SetFloat("_Mode", 3f);
             if (mat.HasProperty("_SrcBlend"))
-                mat.SetFloat("_SrcBlend", (float)BlendMode.One);
+                mat.SetFloat("_SrcBlend", (float)srcBlend);
             if (mat.HasProperty("_DstBlend"))
-                mat.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+                mat.SetFloat("_DstBlend", (float)dstBlend);
             if (mat.HasProperty("_AlphaSrcBlend"))
-                mat.SetFloat("_AlphaSrcBlend", (float)BlendMode.One);
+                mat.SetFloat("_AlphaSrcBlend", (float)srcBlend);
             if (mat.HasProperty("_AlphaDstBlend"))
-                mat.SetFloat("_AlphaDstBlend", (float)BlendMode.OneMinusSrcAlpha);
+                mat.SetFloat("_AlphaDstBlend", (float)dstBlend);
+            SetPremultiplyAlpha(mat, premultiplyAlpha);
             SetLightingEnabled(mat, true);
+            SetDefaultCullMode(mat);
 
             mat.renderQueue = 3000;
             mat.SetOverrideTag("RenderType", "Transparent");
@@ -697,12 +725,15 @@ namespace W3DImporter.Builders
         private static void SetAdditive(Material mat)
         {
             var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
             var color = GetMaterialColor(mat);
+            var emissive = GetMaterialEmissive(mat);
 
-            if (!IsVertexColorShader(mat.shader) && AdditiveShader != null && mat.shader != AdditiveShader)
+            if (AdditiveShader != null && mat.shader != AdditiveShader)
                 mat.shader = AdditiveShader;
 
-            RestoreMaterialState(mat, mainTexture, color);
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
             if (mat.HasProperty("_SurfaceType"))
                 mat.SetFloat("_SurfaceType", 1f);
             if (mat.HasProperty("_BlendMode"))
@@ -723,7 +754,9 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_AlphaClip", 0f);
             if (mat.HasProperty("_AlphaCutoffEnable"))
                 mat.SetFloat("_AlphaCutoffEnable", 0f);
+            SetPremultiplyAlpha(mat, false);
             SetLightingEnabled(mat, false);
+            SetDefaultCullMode(mat);
             mat.renderQueue = 3100;
             mat.SetOverrideTag("RenderType", "Transparent");
             mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
@@ -733,12 +766,16 @@ namespace W3DImporter.Builders
         private static void SetScreen(Material mat)
         {
             var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
             var color = GetMaterialColor(mat);
+            var emissive = GetMaterialEmissive(mat);
 
-            if (!IsVertexColorShader(mat.shader) && TransparentShader != null && mat.shader != TransparentShader)
-                mat.shader = TransparentShader;
+            var screenShader = ParticleShader != null ? ParticleShader : TransparentShader;
+            if (screenShader != null && mat.shader != screenShader)
+                mat.shader = screenShader;
 
-            RestoreMaterialState(mat, mainTexture, color);
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
             if (mat.HasProperty("_SurfaceType"))
                 mat.SetFloat("_SurfaceType", 1f);
             if (mat.HasProperty("_BlendMode"))
@@ -763,7 +800,9 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_AlphaClip", 0f);
             if (mat.HasProperty("_AlphaCutoffEnable"))
                 mat.SetFloat("_AlphaCutoffEnable", 0f);
+            SetPremultiplyAlpha(mat, false);
             SetLightingEnabled(mat, false);
+            SetDefaultCullMode(mat);
 
             mat.renderQueue = 3050;
             mat.SetOverrideTag("RenderType", "Transparent");
@@ -773,12 +812,15 @@ namespace W3DImporter.Builders
 
         private static void SetAlphaClip(Material mat)
         {
-            if (!IsVertexColorShader(mat.shader) && mat.shader != LitShader && LitShader != null)
+            if (mat.shader != LitShader && LitShader != null)
                 mat.shader = LitShader;
 
             var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
             var color = GetMaterialColor(mat);
-            RestoreMaterialState(mat, mainTexture, color);
+            var emissive = GetMaterialEmissive(mat);
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
 
             if (mat.HasProperty("_SurfaceType"))
                 mat.SetFloat("_SurfaceType", 0f);
@@ -804,14 +846,22 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_AlphaDstBlend", (float)BlendMode.Zero);
             if (mat.HasProperty("_ZWrite"))
                 mat.SetFloat("_ZWrite", 1f);
+            SetPremultiplyAlpha(mat, false);
             SetLightingEnabled(mat, true);
+            SetDefaultCullMode(mat);
             mat.EnableKeyword("_ALPHATEST_ON");
             mat.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
             mat.renderQueue = 2450;
             mat.SetOverrideTag("RenderType", "TransparentCutout");
         }
 
-        private static void RestoreMaterialState(Material mat, Texture mainTexture, Color color)
+        private static void RestoreMaterialState(
+            Material mat,
+            Texture mainTexture,
+            Texture detailTexture,
+            Vector2 detailScale,
+            Color color,
+            Color emissive)
         {
             if (mainTexture != null)
             {
@@ -819,7 +869,14 @@ namespace W3DImporter.Builders
                 SetMaterialTexture(mat, mainTexture);
             }
 
+            if (detailTexture != null)
+            {
+                SetSecondaryMaterialTexture(mat, detailTexture);
+                SetSecondaryMaterialTextureScale(mat, detailScale);
+            }
+
             SetMaterialColor(mat, color);
+            SetMaterialEmissive(mat, emissive);
         }
 
         private static void SetOpaque(Material mat)
@@ -828,12 +885,15 @@ namespace W3DImporter.Builders
                 return;
 
             var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
             var color = GetMaterialColor(mat);
+            var emissive = GetMaterialEmissive(mat);
 
-            if (!IsVertexColorShader(mat.shader) && LitShader != null && mat.shader != LitShader)
+            if (LitShader != null && mat.shader != LitShader)
                 mat.shader = LitShader;
 
-            RestoreMaterialState(mat, mainTexture, color);
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
 
             if (mat.HasProperty("_SurfaceType"))
                 mat.SetFloat("_SurfaceType", 0f);
@@ -857,7 +917,9 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_ZWrite", 1f);
             if (mat.HasProperty("_TransparentZWrite"))
                 mat.SetFloat("_TransparentZWrite", 0f);
+            SetPremultiplyAlpha(mat, false);
             SetLightingEnabled(mat, true);
+            SetDefaultCullMode(mat);
 
             mat.renderQueue = -1;
             mat.SetOverrideTag("RenderType", "");
@@ -881,6 +943,20 @@ namespace W3DImporter.Builders
         {
             if (mat.HasProperty("_DetailTex"))
                 mat.SetTexture("_DetailTex", tex);
+            if (mat.HasProperty("_DetailMap"))
+                mat.SetTexture("_DetailMap", tex);
+            if (mat.HasProperty("_DetailAlbedoMap"))
+                mat.SetTexture("_DetailAlbedoMap", tex);
+        }
+
+        private static void SetSecondaryMaterialTextureScale(Material mat, Vector2 scale)
+        {
+            if (mat.HasProperty("_DetailTex"))
+                mat.SetTextureScale("_DetailTex", scale);
+            if (mat.HasProperty("_DetailMap"))
+                mat.SetTextureScale("_DetailMap", scale);
+            if (mat.HasProperty("_DetailAlbedoMap"))
+                mat.SetTextureScale("_DetailAlbedoMap", scale);
         }
 
         private static void SetPostDetailCombine(Material mat, int colorFunc, int alphaFunc, bool useUv2)
@@ -909,6 +985,42 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_ApplyLighting", enabled ? 1f : 0f);
         }
 
+        private static void SetUseVertexColor(Material mat, bool enabled)
+        {
+            if (mat.HasProperty("_UseVertexColor"))
+                mat.SetFloat("_UseVertexColor", enabled ? 1f : 0f);
+        }
+
+        private static void SetPremultiplyAlpha(Material mat, bool enabled)
+        {
+            if (mat.HasProperty("_PremultiplyAlpha"))
+                mat.SetFloat("_PremultiplyAlpha", enabled ? 1f : 0f);
+        }
+
+        private static void SetDefaultCullMode(Material mat)
+        {
+            if (mat.HasProperty("_Cull"))
+                mat.SetFloat("_Cull", (float)CullMode.Back);
+            if (mat.HasProperty("_CullMode"))
+                mat.SetFloat("_CullMode", (float)CullMode.Back);
+            if (mat.HasProperty("_TransparentCullMode"))
+                mat.SetFloat("_TransparentCullMode", (float)CullMode.Back);
+            if (mat.HasProperty("_OpaqueCullMode"))
+                mat.SetFloat("_OpaqueCullMode", (float)CullMode.Back);
+            if (mat.HasProperty("_DoubleSidedEnable"))
+                mat.SetFloat("_DoubleSidedEnable", 0f);
+            if (mat.HasProperty("_FlipBackfaceU"))
+                mat.SetFloat("_FlipBackfaceU", 0f);
+        }
+
+        private static void SetMaterialEmissive(Material mat, Color color)
+        {
+            if (mat.HasProperty("_EmissiveColor"))
+                mat.SetColor("_EmissiveColor", color);
+            if (mat.HasProperty("_EmissionColor"))
+                mat.SetColor("_EmissionColor", color);
+        }
+
         private static Color GetMaterialColor(Material mat)
         {
             if (mat.HasProperty("_UnlitColor"))
@@ -920,8 +1032,41 @@ namespace W3DImporter.Builders
             return Color.white;
         }
 
+        private static Color GetMaterialEmissive(Material mat)
+        {
+            if (mat.HasProperty("_EmissiveColor"))
+                return mat.GetColor("_EmissiveColor");
+            if (mat.HasProperty("_EmissionColor"))
+                return mat.GetColor("_EmissionColor");
+            return Color.black;
+        }
+
+        private static Texture GetSecondaryMaterialTexture(Material mat)
+        {
+            if (mat.HasProperty("_DetailTex"))
+                return mat.GetTexture("_DetailTex");
+            if (mat.HasProperty("_DetailMap"))
+                return mat.GetTexture("_DetailMap");
+            if (mat.HasProperty("_DetailAlbedoMap"))
+                return mat.GetTexture("_DetailAlbedoMap");
+            return null;
+        }
+
+        private static Vector2 GetSecondaryMaterialTextureScale(Material mat)
+        {
+            if (mat.HasProperty("_DetailTex"))
+                return mat.GetTextureScale("_DetailTex");
+            if (mat.HasProperty("_DetailMap"))
+                return mat.GetTextureScale("_DetailMap");
+            if (mat.HasProperty("_DetailAlbedoMap"))
+                return mat.GetTextureScale("_DetailAlbedoMap");
+            return Vector2.one;
+        }
+
         private static void ApplyMeshFlags(Material mat, W3DMesh w3dMesh)
         {
+            SetDefaultCullMode(mat);
+
             if (!w3dMesh.EffectiveTwoSided)
                 return;
 
@@ -935,6 +1080,8 @@ namespace W3DImporter.Builders
                 mat.SetFloat("_OpaqueCullMode", (float)CullMode.Off);
             if (mat.HasProperty("_DoubleSidedEnable"))
                 mat.SetFloat("_DoubleSidedEnable", 1f);
+            if (mat.HasProperty("_FlipBackfaceU"))
+                mat.SetFloat("_FlipBackfaceU", 1f);
         }
 
         private static Material CreateDefaultMaterial()
