@@ -42,6 +42,13 @@ namespace W3DImporter.Builders
         }
     }
 
+    public sealed class W3DFaceMaterialBinding
+    {
+        public int PrimaryTextureIndex = -1;
+        public int SecondaryTextureIndex = -1;
+        public int ShaderIndex = -1;
+    }
+
     public sealed class W3DResolvedTextureAnimation
     {
         public int MaterialIndex;
@@ -576,6 +583,94 @@ namespace W3DImporter.Builders
                 TextureIndex = textureIndex,
                 Texture = w3dMesh.Textures[textureIndex]
             };
+        }
+
+        public static bool TryResolveFaceMaterialBindings(
+            W3DMesh w3dMesh,
+            int materialIndex,
+            out List<int> faceBindingIndices,
+            out List<W3DFaceMaterialBinding> usedBindings)
+        {
+            faceBindingIndices = null;
+            usedBindings = null;
+
+            if (w3dMesh?.Triangles == null || w3dMesh.Triangles.Count == 0)
+                return false;
+
+            if (w3dMesh.Header == null || w3dMesh.Header.MatlCount <= 1)
+                return false;
+
+            var pass = ResolveMaterialPass(w3dMesh, materialIndex, out _);
+            if (pass == null)
+                return false;
+
+            var binding = ResolvePrimaryTextureBinding(w3dMesh, materialIndex);
+            int stageIndex = binding != null && binding.StageIndex >= 0 ? binding.StageIndex : 0;
+            if (stageIndex < 0 || stageIndex >= pass.TxStages.Count)
+                return false;
+
+            var stage = pass.TxStages[stageIndex];
+            if (stage?.TxIds == null || stage.TxIds.Count == 0 || stage.TxIds[0] == null)
+                return false;
+
+            var txIds = stage.TxIds[0];
+            if (txIds.Count != w3dMesh.Triangles.Count)
+                return false;
+
+            List<int> secondaryIds = null;
+            if (pass.TxStages.Count > 1)
+            {
+                var secondaryStage = pass.TxStages[1];
+                if (secondaryStage?.TxIds != null &&
+                    secondaryStage.TxIds.Count > 0 &&
+                    secondaryStage.TxIds[0] != null &&
+                    secondaryStage.TxIds[0].Count == w3dMesh.Triangles.Count)
+                {
+                    secondaryIds = secondaryStage.TxIds[0];
+                }
+            }
+
+            bool shaderIdsPerFace = pass.ShaderIds.Count == w3dMesh.Triangles.Count;
+            var orderedBindings = new List<W3DFaceMaterialBinding>();
+            var bindingIndexByKey = new Dictionary<string, int>();
+            var perFaceBindingIndices = new List<int>(w3dMesh.Triangles.Count);
+
+            for (int i = 0; i < txIds.Count; i++)
+            {
+                int primaryTextureIndex = txIds[i];
+                if (primaryTextureIndex < 0 || primaryTextureIndex >= w3dMesh.Textures.Count)
+                    return false;
+
+                int secondaryTextureIndex = secondaryIds != null ? secondaryIds[i] : -1;
+                if (secondaryTextureIndex >= w3dMesh.Textures.Count)
+                    secondaryTextureIndex = -1;
+
+                int shaderIndex = shaderIdsPerFace ? pass.ShaderIds[i] : -1;
+                string key = primaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                             "|" + secondaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                             "|" + shaderIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+                if (!bindingIndexByKey.TryGetValue(key, out int bindingIndex))
+                {
+                    bindingIndex = orderedBindings.Count;
+                    bindingIndexByKey[key] = bindingIndex;
+                    orderedBindings.Add(new W3DFaceMaterialBinding
+                    {
+                        PrimaryTextureIndex = primaryTextureIndex,
+                        SecondaryTextureIndex = secondaryTextureIndex,
+                        ShaderIndex = shaderIndex
+                    });
+                }
+
+                perFaceBindingIndices.Add(bindingIndex);
+            }
+
+            if (orderedBindings.Count <= 1)
+                return false;
+
+            faceBindingIndices = perFaceBindingIndices;
+            usedBindings = orderedBindings;
+            return true;
         }
 
         private static W3DTextureBinding ResolvePromotedAnimatedBinding(

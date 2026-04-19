@@ -36,14 +36,7 @@ namespace W3DImporter.Builders
                 mesh.normals = normals;
             }
 
-            var triangles = new int[w3dMesh.Triangles.Count * 3];
-            for (int i = 0; i < w3dMesh.Triangles.Count; i++)
-            {
-                triangles[i * 3 + 0] = (int)w3dMesh.Triangles[i].VertIds[0];
-                triangles[i * 3 + 1] = (int)w3dMesh.Triangles[i].VertIds[1];
-                triangles[i * 3 + 2] = (int)w3dMesh.Triangles[i].VertIds[2];
-            }
-            mesh.triangles = triangles;
+            ApplyTriangles(mesh, w3dMesh);
 
             SetUVs(mesh, w3dMesh);
             SetVertexColors(mesh, w3dMesh);
@@ -77,6 +70,45 @@ namespace W3DImporter.Builders
             }
 
             return go;
+        }
+
+        private static void ApplyTriangles(UnityEngine.Mesh mesh, W3DMesh w3dMesh)
+        {
+            if (W3DTextureAnimationResolver.TryResolveFaceMaterialBindings(w3dMesh, 0, out var faceBindingIndices, out var usedBindings))
+            {
+                var submeshTriangles = new List<int>[usedBindings.Count];
+                for (int i = 0; i < usedBindings.Count; i++)
+                    submeshTriangles[i] = new List<int>();
+
+                for (int i = 0; i < w3dMesh.Triangles.Count; i++)
+                {
+                    int submeshIndex = (i < faceBindingIndices.Count) ? faceBindingIndices[i] : 0;
+                    if (submeshIndex < 0 || submeshIndex >= submeshTriangles.Length)
+                        submeshIndex = 0;
+
+                    var tri = w3dMesh.Triangles[i];
+                    var indices = submeshTriangles[submeshIndex];
+                    indices.Add((int)tri.VertIds[0]);
+                    indices.Add((int)tri.VertIds[1]);
+                    indices.Add((int)tri.VertIds[2]);
+                }
+
+                mesh.subMeshCount = usedBindings.Count;
+                for (int i = 0; i < submeshTriangles.Length; i++)
+                    mesh.SetTriangles(submeshTriangles[i], i, false);
+
+                Debug.Log($"[W3D] Mesh '{w3dMesh.Name}': split into {usedBindings.Count} submeshes from per-face face-material bindings");
+                return;
+            }
+
+            var triangles = new int[w3dMesh.Triangles.Count * 3];
+            for (int i = 0; i < w3dMesh.Triangles.Count; i++)
+            {
+                triangles[i * 3 + 0] = (int)w3dMesh.Triangles[i].VertIds[0];
+                triangles[i * 3 + 1] = (int)w3dMesh.Triangles[i].VertIds[1];
+                triangles[i * 3 + 2] = (int)w3dMesh.Triangles[i].VertIds[2];
+            }
+            mesh.triangles = triangles;
         }
 
         // E&B uses "D_LIGHT##" mesh-name markers for dynamic light placement at runtime.
@@ -676,7 +708,7 @@ namespace W3DImporter.Builders
                     if (i < w3dMesh.DirectUVs.Count)
                     {
                         var uv = w3dMesh.DirectUVs[i];
-                        directUVs[i] = new Vector2(1f - uv.x, 1f - uv.y);
+                        directUVs[i] = new Vector2(uv.x, 1f - uv.y);
                     }
                     else
                     {
@@ -731,7 +763,7 @@ namespace W3DImporter.Builders
             for (int i = 0; i < mesh.vertexCount; i++)
             {
                 if (i < rawUVs.Count)
-                    finalUVs[i] = new Vector2(1f - rawUVs[i].x, 1f - rawUVs[i].y);
+                    finalUVs[i] = new Vector2(rawUVs[i].x, 1f - rawUVs[i].y);
                 else
                     finalUVs[i] = Vector2.zero;
             }
@@ -754,7 +786,7 @@ namespace W3DImporter.Builders
                         if (i < txCoords2.Count)
                         {
                             var uv = txCoords2[i];
-                            uv2[i] = new Vector2(1f - uv.x, 1f - uv.y);
+                            uv2[i] = new Vector2(uv.x, 1f - uv.y);
                         }
                         else
                         {

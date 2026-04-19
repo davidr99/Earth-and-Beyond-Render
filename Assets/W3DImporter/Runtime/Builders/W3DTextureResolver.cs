@@ -300,7 +300,6 @@ namespace W3DImporter.Builders
                             if (x >= width || y >= height) continue;
 
                             int idx = (int)((lookup >> (py * 8 + px * 2)) & 0x3);
-                            // DDS is stored top-to-bottom, Unity bottom-to-top
                             pixels[y * width + x] = palette[idx];
                         }
                     }
