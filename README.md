@@ -9,7 +9,10 @@ original DirectX 8 game client renders.
 The chunk layouts are based on a reverse-engineered format specification
 derived from decompiles of the E&B game client and Westwood's official
 W3D viewer, so parsing follows what the game actually accepts rather than
-third-party documentation.
+third-party documentation. The full spec is included in this repository:
+**[Docs/W3D_FORMAT.md](Docs/W3D_FORMAT.md)** — covering the chunk grammar,
+mesh/material/animation layouts, compression codecs, and a corrections
+table for errors found in older community documentation.
 
 ## Features
 
