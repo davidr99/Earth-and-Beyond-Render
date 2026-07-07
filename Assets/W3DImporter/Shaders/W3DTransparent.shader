@@ -19,6 +19,10 @@ Shader "W3D/Transparent"
         [Toggle] _UseVertexColor ("Use Vertex Color", Float) = 0
         [Toggle] _PremultiplyAlpha ("Premultiply Alpha", Float) = 0
         [HideInInspector] _FlipBackfaceU ("Flip Backface U", Float) = 0
+        [HideInInspector] _W3DViewerAmbientColor ("W3D Viewer Ambient", Color) = (0.18,0.18,0.18,1)
+        [HideInInspector] _W3DViewerLightDirection ("W3D Viewer Light Direction", Vector) = (0.35,0.85,0.35,0)
+        [HideInInspector] _W3DViewerLightColor ("W3D Viewer Light Color", Color) = (1,1,1,1)
+        [HideInInspector] _W3DViewerLightIntensity ("W3D Viewer Light Intensity", Float) = 1.1
 
         [HideInInspector] _SrcBlend ("Src Blend", Float) = 1.0
         [HideInInspector] _DstBlend ("Dst Blend", Float) = 0.0
@@ -68,6 +72,10 @@ Shader "W3D/Transparent"
                 float _UseVertexColor;
                 float _PremultiplyAlpha;
                 float _FlipBackfaceU;
+                float4 _W3DViewerAmbientColor;
+                float4 _W3DViewerLightDirection;
+                float4 _W3DViewerLightColor;
+                float _W3DViewerLightIntensity;
             CBUFFER_END
 
             struct Attributes
@@ -113,6 +121,25 @@ Shader "W3D/Transparent"
                     case 3: return saturate(localAlpha + detailAlpha - (localAlpha * detailAlpha));
                     default: return localAlpha;
                 }
+            }
+
+            float3 ApplyW3DPreviewLighting(float3 color, float3 normalWS)
+            {
+                float3 normal = normalWS;
+                if (dot(normal, normal) <= 0.0001)
+                    normal = float3(0.0, 1.0, 0.0);
+                normal = normalize(normal);
+
+                float3 lightDir = _W3DViewerLightDirection.xyz;
+                if (dot(lightDir, lightDir) <= 0.0001)
+                    lightDir = float3(0.3, 0.8, 0.2);
+                lightDir = normalize(lightDir);
+
+                float3 ambient = _W3DViewerAmbientColor.rgb;
+                float intensity = max(_W3DViewerLightIntensity, 0.0);
+                float3 lightColor = _W3DViewerLightColor.rgb;
+                float diffuse = max(abs(dot(normal, lightDir)), 0.35) * intensity;
+                return color * saturate(ambient + lightColor * diffuse);
             }
 
             Varyings Vert(Attributes input)
@@ -163,8 +190,8 @@ Shader "W3D/Transparent"
 
                 if (_ApplyLighting > 0.5)
                 {
-                    float light = dot(normalize(input.normalWS), float3(0.3, 0.8, 0.2)) * 0.4 + 0.6;
-                    col.rgb *= light;
+                    float3 normalWS = isFrontFace ? input.normalWS : -input.normalWS;
+                    col.rgb = ApplyW3DPreviewLighting(col.rgb, normalWS);
                 }
 
                 if (_PremultiplyAlpha > 0.5)

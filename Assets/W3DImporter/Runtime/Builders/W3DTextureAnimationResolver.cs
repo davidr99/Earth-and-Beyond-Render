@@ -44,6 +44,7 @@ namespace W3DImporter.Builders
 
     public sealed class W3DFaceMaterialBinding
     {
+        public int VertexMaterialIndex = -1;
         public int PrimaryTextureIndex = -1;
         public int SecondaryTextureIndex = -1;
         public int ShaderIndex = -1;
@@ -141,7 +142,7 @@ namespace W3DImporter.Builders
 
             var firstBinding = ResolveFirstTextureBinding(w3dMesh, materialIndex);
             var shader = ResolveShader(w3dMesh, materialIndex);
-            if (firstBinding != null && shader != null && (shader.PostDetailColorFunc != 0 || shader.PostDetailAlphaFunc != 0))
+            if (firstBinding != null && shader != null && (shader.DetailColorFunc != 0 || shader.DetailAlphaFunc != 0))
                 return firstBinding;
 
             var animations = ResolveTextureAnimations(w3dMesh, materialIndex);
@@ -571,7 +572,10 @@ namespace W3DImporter.Builders
             if (stage?.TxIds == null || stage.TxIds.Count == 0 || stage.TxIds[0] == null || stage.TxIds[0].Count == 0)
                 return null;
 
-            int textureIndex = stage.TxIds[0][0];
+            int textureSlot = materialIndex >= 0 && materialIndex < stage.TxIds[0].Count
+                ? materialIndex
+                : 0;
+            int textureIndex = stage.TxIds[0][textureSlot];
             if (textureIndex < 0 || textureIndex >= w3dMesh.Textures.Count)
                 return null;
 
@@ -614,7 +618,9 @@ namespace W3DImporter.Builders
                 return false;
 
             var txIds = stage.TxIds[0];
-            if (txIds.Count != w3dMesh.Triangles.Count)
+            bool texturesPerFace = txIds.Count == w3dMesh.Triangles.Count;
+            bool vertexMaterialsPerFace = pass.VertexMaterialIds.Count == w3dMesh.Triangles.Count;
+            if (!texturesPerFace && !vertexMaterialsPerFace)
                 return false;
 
             List<int> secondaryIds = null;
@@ -635,10 +641,10 @@ namespace W3DImporter.Builders
             var bindingIndexByKey = new Dictionary<string, int>();
             var perFaceBindingIndices = new List<int>(w3dMesh.Triangles.Count);
 
-            for (int i = 0; i < txIds.Count; i++)
+            for (int i = 0; i < w3dMesh.Triangles.Count; i++)
             {
-                int primaryTextureIndex = txIds[i];
-                if (primaryTextureIndex < 0 || primaryTextureIndex >= w3dMesh.Textures.Count)
+                int primaryTextureIndex = texturesPerFace ? txIds[i] : -1;
+                if (primaryTextureIndex >= w3dMesh.Textures.Count)
                     return false;
 
                 int secondaryTextureIndex = secondaryIds != null ? secondaryIds[i] : -1;
@@ -646,7 +652,9 @@ namespace W3DImporter.Builders
                     secondaryTextureIndex = -1;
 
                 int shaderIndex = shaderIdsPerFace ? pass.ShaderIds[i] : -1;
-                string key = primaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                int vertexMaterialIndex = vertexMaterialsPerFace ? pass.VertexMaterialIds[i] : -1;
+                string key = vertexMaterialIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                             "|" + primaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                              "|" + secondaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                              "|" + shaderIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
@@ -656,6 +664,7 @@ namespace W3DImporter.Builders
                     bindingIndexByKey[key] = bindingIndex;
                     orderedBindings.Add(new W3DFaceMaterialBinding
                     {
+                        VertexMaterialIndex = vertexMaterialIndex,
                         PrimaryTextureIndex = primaryTextureIndex,
                         SecondaryTextureIndex = secondaryTextureIndex,
                         ShaderIndex = shaderIndex

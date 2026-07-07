@@ -21,19 +21,31 @@ namespace W3DImporter.IO
         public const uint LIGHTSCAPE = 0x00000800;
         public const uint DAZZLE = 0x00000900;
         public const uint SOUNDROBJ = 0x00000A00;
+        public const uint SHDMESH = 0x00000B00;
 
         // Mesh sub-chunks
         public const uint MESH_HEADER = 0x0000001F;
         public const uint VERTICES = 0x00000002;
         public const uint VERTICES_2 = 0x00000C00;
         public const uint VERTEX_NORMALS = 0x00000003;
-        public const uint ENB_UV_COORDS = 0x00000005;
+        public const uint TEXCOORDS = 0x00000005;
+        public const uint ENB_UV_COORDS = TEXCOORDS;
         public const uint NORMALS_2 = 0x00000C01;
         public const uint MESH_USER_TEXT = 0x0000000C;
-        public const uint ENB_MATERIAL_VERTEX_COLORS = 0x0000000D;
+        public const uint VERTEX_COLORS = 0x0000000D;
+        public const uint ENB_MATERIAL_VERTEX_COLORS = VERTEX_COLORS;
         public const uint VERTEX_INFLUENCES = 0x0000000E;
+        public const uint MATERIALS3 = 0x00000015;
+        public const uint MATERIAL3 = 0x00000016;
+        public const uint MATERIAL3_NAME = 0x00000017;
+        public const uint MATERIAL3_INFO = 0x00000018;
+        public const uint MATERIAL3_DC_MAP = 0x00000019;
+        public const uint MAP3_FILENAME = 0x0000001A;
+        public const uint MAP3_INFO = 0x0000001B;
+        public const uint MATERIAL3_SI_MAP = 0x0000001E;
         public const uint TRIANGLES = 0x00000020;
-        public const uint ENB_PER_TRIANGLE_SHADER_INDEX = 0x00000021;
+        public const uint PER_TRIANGLE_MATERIAL_IDS = 0x00000021;
+        public const uint ENB_PER_TRIANGLE_SHADER_INDEX = PER_TRIANGLE_MATERIAL_IDS;
         public const uint VERTEX_SHADE_INDICES = 0x00000022;
         public const uint MATERIAL_INFO = 0x00000028;
         public const uint SHADERS = 0x00000029;
@@ -92,6 +104,10 @@ namespace W3DImporter.IO
         public const uint COMPRESSED_BIT_CHANNEL = 0x00000283;
         public const uint COMPRESSED_ANIMATION_MOTION_CHANNEL = 0x00000284;
 
+        // LOD model sub-chunks
+        public const uint LODMODEL_HEADER = 0x00000401;
+        public const uint LODMODEL_LOD = 0x00000402;
+
         // HLOD sub-chunks
         public const uint HLOD_HEADER = 0x00000701;
         public const uint HLOD_LOD_ARRAY = 0x00000702;
@@ -122,6 +138,23 @@ namespace W3DImporter.IO
         public const uint BOX_COLOR = 0x00000742;
         public const uint BOX_CENTER = 0x00000743;
         public const uint BOX_EXTENT = 0x00000744;
+
+        // ShdMesh sub-chunks
+        public const uint SHDMESH_NAME = 0x00000B01;
+        public const uint SHDMESH_HEADER = 0x00000B02;
+        public const uint SHDMESH_USER_TEXT = 0x00000B03;
+        public const uint SHDMESH_SUBMESH = 0x00000B20;
+        public const uint SHDMESH_SUBMESH_HEADER = 0x00000B21;
+        public const uint SHDMESH_SHADER = 0x00000B40;
+        public const uint SHDMESH_VERTICES = 0x00000B43;
+        public const uint SHDMESH_VERTEX_NORMALS = 0x00000B44;
+        public const uint SHDMESH_TRIANGLES = 0x00000B45;
+        public const uint SHDMESH_VERTEX_SHADE_INDICES = 0x00000B46;
+        public const uint SHDMESH_UV0 = 0x00000B47;
+        public const uint SHDMESH_UV1 = 0x00000B48;
+        public const uint SHDMESH_TANGENTS = 0x00000B49;
+        public const uint SHDMESH_BITANGENTS = 0x00000B4A;
+        public const uint SHDMESH_TANGENT_CROSS = 0x00000B4B;
 
         // Material pass sub-chunks
         public const uint TX_COORDS = 0x00000048;

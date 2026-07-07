@@ -41,8 +41,17 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.EMITTER_FRAME_KEYFRAMES:
                         emitter.FrameData = ReadFrameKeyframes(reader, chunk.ChunkEnd);
                         break;
+                    case W3DChunkTypes.EMITTER_LINE_PROPERTIES:
+                        emitter.LineProperties = ReadLineProperties(reader);
+                        break;
+                    case W3DChunkTypes.EMITTER_BLUR_TIME_KEYFRAMES:
+                        emitter.BlurTimeData = ReadBlurTimeKeyframes(reader, chunk.ChunkEnd);
+                        break;
+                    case W3DChunkTypes.EMITTER_EXTRA_KEYFRAMES:
+                        emitter.ExtraData = ReadExtraKeyframes(reader, chunk.ChunkEnd);
+                        break;
                     default:
-                        // Skip line properties, keyframes, etc. for now
+                        // Anything else is genuinely unrecognized.
                         break;
                 }
                 reader.Seek(chunk.ChunkEnd);
@@ -171,6 +180,76 @@ namespace W3DImporter.Parsers
                 });
             }
 
+            return data;
+        }
+
+        // EMITTER_LINE_PROPERTIES (0x509) — fixed 64-byte struct.
+        // Layout (per io_mesh_w3d/w3d/structs/emitter.py EmitterLineProperties.read):
+        //   u32 flags, u32 subdivision_level,
+        //   f32 noise_amplitude, f32 merge_abort_factor, f32 texture_tile_factor,
+        //   f32 u_per_sec, f32 v_per_sec, then 36 bytes reserved.
+        private static W3DEmitterLineProperties ReadLineProperties(W3DBinaryReader reader)
+        {
+            var lp = new W3DEmitterLineProperties
+            {
+                Flags = reader.ReadUInt32(),
+                SubdivisionLevel = reader.ReadUInt32(),
+                NoiseAmplitude = reader.ReadFloat(),
+                MergeAbortFactor = reader.ReadFloat(),
+                TextureTileFactor = reader.ReadFloat(),
+                UPerSec = reader.ReadFloat(),
+                VPerSec = reader.ReadFloat()
+            };
+            reader.Skip(36); // reserved
+            return lp;
+        }
+
+        // EMITTER_BLUR_TIME_KEYFRAMES (0x50C).
+        // Layout: u32 count, f32 random, 4 bytes reserved, then count × {f32 time, f32 value}.
+        // (Mirrors RotationKeyframes' shape but with one-float header instead of two.)
+        private static W3DEmitterBlurTimeData ReadBlurTimeKeyframes(W3DBinaryReader reader, long end)
+        {
+            var keyframeCount = reader.ReadUInt32();
+            var data = new W3DEmitterBlurTimeData
+            {
+                Random = reader.ReadFloat()
+            };
+            reader.Skip(4); // reserved
+
+            int maxKeysFromChunk = (int)((end - reader.Position) / 8);
+            int keysToRead = keyframeCount > 0 ? System.Math.Min((int)keyframeCount + 1, maxKeysFromChunk) : maxKeysFromChunk;
+            for (int i = 0; i < keysToRead; i++)
+            {
+                data.Keyframes.Add(new W3DFloatKeyframe
+                {
+                    Time = reader.ReadFloat(),
+                    Value = reader.ReadFloat()
+                });
+            }
+            return data;
+        }
+
+        // EMITTER_EXTRA_KEYFRAMES (0x50D, EnB-specific).
+        // Same shape as Frame keyframes — count + random + 8-byte pad + key list.
+        private static W3DEmitterExtraData ReadExtraKeyframes(W3DBinaryReader reader, long end)
+        {
+            var keyframeCount = reader.ReadUInt32();
+            var data = new W3DEmitterExtraData
+            {
+                Random = reader.ReadFloat()
+            };
+            reader.Skip(8); // reserved
+
+            int maxKeysFromChunk = (int)((end - reader.Position) / 8);
+            int keysToRead = keyframeCount > 0 ? System.Math.Min((int)keyframeCount + 1, maxKeysFromChunk) : maxKeysFromChunk;
+            for (int i = 0; i < keysToRead; i++)
+            {
+                data.Keyframes.Add(new W3DFloatKeyframe
+                {
+                    Time = reader.ReadFloat(),
+                    Value = reader.ReadFloat()
+                });
+            }
             return data;
         }
     }

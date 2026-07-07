@@ -8,19 +8,29 @@ using W3DImporter.Structs.Hierarchy;
 using W3DImporter.Structs.HLod;
 using W3DImporter.Structs.Aggregate;
 using W3DImporter.Structs.Animation;
+using W3DImporter.Structs.Emitter;
 using W3DImporter.Parsers;
 
 namespace W3DImporter.Builders
 {
     public class W3DSceneBuilder
     {
+        private const bool EnableVerboseBuildLogging = false;
+        private static readonly Dictionary<string, string[]> SharedW3dFileListCache = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         private readonly string _baseDirectory;
         private readonly W3DTextureResolver _textureResolver;
+        private readonly Dictionary<string, GameObject> _aggregateSubModelTemplateCache;
 
         public W3DSceneBuilder(string baseDirectory)
+            : this(baseDirectory, new W3DTextureResolver(baseDirectory), new Dictionary<string, GameObject>(StringComparer.OrdinalIgnoreCase))
+        {
+        }
+
+        private W3DSceneBuilder(string baseDirectory, W3DTextureResolver textureResolver, Dictionary<string, GameObject> aggregateSubModelTemplateCache)
         {
             _baseDirectory = baseDirectory;
-            _textureResolver = new W3DTextureResolver(baseDirectory);
+            _textureResolver = textureResolver ?? new W3DTextureResolver(baseDirectory);
+            _aggregateSubModelTemplateCache = aggregateSubModelTemplateCache ?? new Dictionary<string, GameObject>(StringComparer.OrdinalIgnoreCase);
         }
 
         public GameObject Build(W3DDataContext context)
@@ -39,10 +49,14 @@ namespace W3DImporter.Builders
                 context.HLod = BuildHLodFromAggregate(context, aggregateBaseModel);
 
             string rootName = context.Aggregate?.Header?.Name
+                ?? context.LodModel?.Header?.Name
                 ?? context.HLod?.Header?.ModelName
                 ?? context.Hierarchy?.Header?.Name
                 ?? "W3DModel";
             var root = new GameObject(rootName);
+            var meshLookup = CreateMeshLookup(context.Meshes);
+            var emitterLookup = CreateEmitterLookup(context.Emitters);
+            bool builtLodModel = context.LodModel != null && BuildLodModel(context, root.transform, meshLookup);
 
             var boneTransforms = new Dictionary<int, Transform>();
             if (context.Hierarchy != null)
@@ -50,127 +64,42 @@ namespace W3DImporter.Builders
                 BuildHierarchy(context.Hierarchy, root.transform, boneTransforms);
             }
 
-            if (context.HLod != null)
+            if (!builtLodModel && context.HLod != null)
             {
-                ZeroBillboardOnlyBoneRotations(context, boneTransforms);
+                ZeroBillboardOnlyBoneRotations(context, boneTransforms, meshLookup);
 
-                bool hasMultipleLods = context.HLod.LodArrays.Count > 1;
-
-                if (hasMultipleLods)
+                var lodArray = GetHighestDetailHLodArray(context.HLod);
+                if (lodArray != null)
                 {
-                    var lodGroup = root.AddComponent<LODGroup>();
-                    int lodCount = context.HLod.LodArrays.Count;
-                    var lodList = new List<LOD>();
-
-                    for (int i = lodCount - 1; i >= 0; i--)
+                    foreach (var subObj in lodArray.SubObjects)
                     {
-                        var lodArray = context.HLod.LodArrays[i];
-                        var renderers = new List<Renderer>();
-
-                        foreach (var subObj in lodArray.SubObjects)
+                        if (meshLookup.TryGetValue(subObj.Name, out var mesh))
                         {
-                            if (string.IsNullOrEmpty(subObj.Name) || subObj.Name == "NULL")
-                                continue;
-
-                            foreach (var mesh in context.Meshes)
+                            Transform meshParent = root.transform;
+                            if (!(mesh.IsSkin && mesh.VertInfs.Count == 0) &&
+                                boneTransforms.ContainsKey(subObj.BoneIndex))
                             {
-                                if (mesh.Name == subObj.Name)
-                                {
-                                    bool rigSpace = mesh.IsSkin && mesh.VertInfs.Count == 0;
-                                    Transform meshParent = root.transform;
-                                    if (!rigSpace && boneTransforms.ContainsKey(subObj.BoneIndex))
-                                        meshParent = boneTransforms[subObj.BoneIndex];
-
-                                    Debug.Log($"[W3D Attach] {mesh.Name}: skin={mesh.IsSkin} infs={mesh.VertInfs.Count} bone={subObj.BoneIndex} parent={meshParent.name}");
-
-                                    var meshGo = W3DMeshBuilder.Build(mesh, _textureResolver);
-                                    meshGo.transform.SetParent(meshParent, false);
-                                    var mr = meshGo.GetComponent<Renderer>();
-                                    if (mr != null) renderers.Add(mr);
-                                    break;
-                                }
+                                meshParent = boneTransforms[subObj.BoneIndex];
                             }
+
+                            if (EnableVerboseBuildLogging)
+                                Debug.Log($"[W3D Attach] {mesh.Name}: skin={mesh.IsSkin} infs={mesh.VertInfs.Count} bone={subObj.BoneIndex} parent={meshParent.name}");
+
+                            var meshGo = W3DMeshBuilder.Build(mesh, _textureResolver);
+                            meshGo.transform.SetParent(meshParent, false);
                         }
 
-                        if (renderers.Count == 0) continue;
-
-                        int unityLodIdx = lodList.Count;
-                        float screenSize = Mathf.Lerp(0.01f, 0.5f, 1f - (float)unityLodIdx / Mathf.Max(1, lodCount - 1));
-                        lodList.Add(new LOD(screenSize, renderers.ToArray()));
-                        Debug.Log($"[W3D] LOD[{unityLodIdx}] (w3d {i}): {renderers.Count} renderers, threshold={screenSize:F2}");
-                    }
-
-                    if (lodList.Count > 0)
-                    {
-                        lodGroup.SetLODs(lodList.ToArray());
-                        lodGroup.RecalculateBounds();
-                    }
-                    else
-                    {
-                        UnityEngine.Object.Destroy(lodGroup);
-                    }
-                }
-                else
-                {
-                    foreach (var lodArray in context.HLod.LodArrays)
-                    {
-                        foreach (var subObj in lodArray.SubObjects)
+                        if (emitterLookup.TryGetValue(subObj.Name, out var emitter))
                         {
-                            foreach (var mesh in context.Meshes)
-                            {
-                                if (mesh.Name == subObj.Name)
-                                {
-                                    Transform meshParent = root.transform;
-                                    if (!(mesh.IsSkin && mesh.VertInfs.Count == 0) &&
-                                        boneTransforms.ContainsKey(subObj.BoneIndex))
-                                    {
-                                        meshParent = boneTransforms[subObj.BoneIndex];
-                                    }
-
-                                    var meshGo = W3DMeshBuilder.Build(mesh, _textureResolver);
-                                    meshGo.transform.SetParent(meshParent, false);
-                                    break;
-                                }
-                            }
-
-                            foreach (var emitter in context.Emitters)
-                            {
-                                if (emitter.Name == subObj.Name)
-                                {
-                                    Transform boneParent = root.transform;
-                                    if (boneTransforms.ContainsKey(subObj.BoneIndex))
-                                        boneParent = boneTransforms[subObj.BoneIndex];
-                                    W3DEmitterBuilder.Build(emitter, boneParent, _textureResolver);
-                                    break;
-                                }
-                            }
+                            Transform boneParent = root.transform;
+                            if (boneTransforms.ContainsKey(subObj.BoneIndex))
+                                boneParent = boneTransforms[subObj.BoneIndex];
+                            W3DEmitterBuilder.Build(emitter, boneParent, _textureResolver);
                         }
-                    }
-                }
-
-                if (hasMultipleLods)
-                {
-                    foreach (var lodArray in context.HLod.LodArrays)
-                    {
-                        foreach (var subObj in lodArray.SubObjects)
-                        {
-                            foreach (var emitter in context.Emitters)
-                            {
-                                if (emitter.Name == subObj.Name)
-                                {
-                                    Transform boneParent = root.transform;
-                                    if (boneTransforms.ContainsKey(subObj.BoneIndex))
-                                        boneParent = boneTransforms[subObj.BoneIndex];
-                                    W3DEmitterBuilder.Build(emitter, boneParent, _textureResolver);
-                                    break;
-                                }
-                            }
-                        }
-                        break;
                     }
                 }
             }
-            else
+            else if (!builtLodModel)
             {
                 foreach (var mesh in context.Meshes)
                 {
@@ -248,7 +177,8 @@ namespace W3DImporter.Builders
             animation.playAutomatically = true;
             animation.Play(clips[0].name);
 
-            Debug.Log($"[W3D] Attached {clips.Count} animation clip(s); playing '{clips[0].name}'");
+            if (EnableVerboseBuildLogging)
+                Debug.Log($"[W3D] Attached {clips.Count} animation clip(s); playing '{clips[0].name}'");
         }
 
         private void AddClip(W3DAnimation animationData, W3DHierarchy hierarchy, List<AnimationClip> clips, HashSet<string> clipNames)
@@ -278,7 +208,7 @@ namespace W3DImporter.Builders
         // billboard renders with whatever 180° Z etc. the artist baked into the pivot. Zeroing
         // localRotation on bones that exclusively host billboard meshes matches runtime semantics
         // without disturbing translation or any unrelated non-billboard children on the same bone.
-        private void ZeroBillboardOnlyBoneRotations(W3DDataContext context, Dictionary<int, Transform> boneTransforms)
+        private void ZeroBillboardOnlyBoneRotations(W3DDataContext context, Dictionary<int, Transform> boneTransforms, Dictionary<string, W3DMesh> meshLookup)
         {
             var boneHasBillboard = new HashSet<int>();
             var boneHasNonBillboard = new HashSet<int>();
@@ -290,16 +220,7 @@ namespace W3DImporter.Builders
                     if (string.IsNullOrEmpty(subObj.Name) || subObj.Name == "NULL")
                         continue;
 
-                    W3DMesh matched = null;
-                    foreach (var mesh in context.Meshes)
-                    {
-                        if (mesh.Name == subObj.Name)
-                        {
-                            matched = mesh;
-                            break;
-                        }
-                    }
-                    if (matched == null)
+                    if (!meshLookup.TryGetValue(subObj.Name, out var matched))
                         continue;
 
                     if (matched.IsCameraAligned || matched.IsCameraOriented)
@@ -318,7 +239,8 @@ namespace W3DImporter.Builders
                 if (bone == null || bone.localRotation == Quaternion.identity)
                     continue;
 
-                Debug.Log($"[W3D Billboard] Zeroing localRotation on bone '{bone.name}' (hosts only billboard meshes)");
+                if (EnableVerboseBuildLogging)
+                    Debug.Log($"[W3D Billboard] Zeroing localRotation on bone '{bone.name}' (hosts only billboard meshes)");
                 bone.localRotation = Quaternion.identity;
             }
         }
@@ -411,7 +333,7 @@ namespace W3DImporter.Builders
                     knownCompressed.Add(context.CompressedAnimations[i].Header.Name);
             }
 
-            foreach (var path in Directory.GetFiles(_baseDirectory, "*.w3d"))
+            foreach (var path in GetW3dFiles(_baseDirectory))
             {
                 var foundAnimations = new List<W3DAnimation>();
                 var foundCompressedAnimations = new List<W3DCompressedAnimation>();
@@ -454,7 +376,8 @@ namespace W3DImporter.Builders
                 return null;
             }
 
-            Debug.Log($"[W3D] Loading aggregate base model: {modelPath}");
+            if (EnableVerboseBuildLogging)
+                Debug.Log($"[W3D] Loading aggregate base model: {modelPath}");
             var baseContext = W3DFileParser.Parse(modelPath);
 
             MergeAggregateBaseModel(context, baseContext);
@@ -495,6 +418,8 @@ namespace W3DImporter.Builders
             if (context.Aggregate?.Info == null)
                 return;
 
+            var boneTransformLookup = CreateBoneTransformLookup(context.Hierarchy, boneTransforms);
+
             foreach (var sub in context.Aggregate.Info.SubObjects)
             {
                 if (string.IsNullOrWhiteSpace(sub.SubObjectName))
@@ -507,23 +432,216 @@ namespace W3DImporter.Builders
                     continue;
                 }
 
-                var subContext = W3DFileParser.Parse(modelPath);
-                var subRoot = new W3DSceneBuilder(_baseDirectory).Build(subContext);
+                string normalizedModelPath = Path.GetFullPath(modelPath);
+                GameObject subRoot;
+                if (_aggregateSubModelTemplateCache.TryGetValue(normalizedModelPath, out var template) && template != null)
+                {
+                    subRoot = UnityEngine.Object.Instantiate(template);
+                }
+                else
+                {
+                    var subContext = W3DFileParser.Parse(normalizedModelPath);
+                    subRoot = new W3DSceneBuilder(_baseDirectory, _textureResolver, _aggregateSubModelTemplateCache).Build(subContext);
+                    _aggregateSubModelTemplateCache[normalizedModelPath] = subRoot;
+                }
 
                 Transform parent = root;
-                if (context.Hierarchy != null)
-                {
-                    int boneIndex = context.Hierarchy.FindBoneIndex(sub.BoneName);
-                    if (boneTransforms.TryGetValue(boneIndex, out var boneTransform))
-                        parent = boneTransform;
-                }
+                if (!string.IsNullOrWhiteSpace(sub.BoneName) &&
+                    boneTransformLookup.TryGetValue(sub.BoneName, out var boneTransform))
+                    parent = boneTransform;
 
                 subRoot.transform.SetParent(parent, false);
                 subRoot.transform.localPosition = Vector3.zero;
                 subRoot.transform.localRotation = Quaternion.identity;
                 subRoot.transform.localScale = Vector3.one;
-                Debug.Log($"[W3D Aggregate] Attached '{sub.SubObjectName}' to bone '{sub.BoneName}' under '{parent.name}'");
+                if (EnableVerboseBuildLogging)
+                    Debug.Log($"[W3D Aggregate] Attached '{sub.SubObjectName}' to bone '{sub.BoneName}' under '{parent.name}'");
             }
+        }
+
+        private static Dictionary<string, W3DMesh> CreateMeshLookup(List<W3DMesh> meshes)
+        {
+            var lookup = new Dictionary<string, W3DMesh>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < meshes.Count; i++)
+            {
+                var mesh = meshes[i];
+                if (mesh != null && !string.IsNullOrWhiteSpace(mesh.Name) && !lookup.ContainsKey(mesh.Name))
+                    lookup.Add(mesh.Name, mesh);
+            }
+
+            return lookup;
+        }
+
+        private static Dictionary<string, W3DEmitter> CreateEmitterLookup(List<W3DEmitter> emitters)
+        {
+            var lookup = new Dictionary<string, W3DEmitter>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < emitters.Count; i++)
+            {
+                var emitter = emitters[i];
+                if (emitter != null && !string.IsNullOrWhiteSpace(emitter.Name) && !lookup.ContainsKey(emitter.Name))
+                    lookup.Add(emitter.Name, emitter);
+            }
+
+            return lookup;
+        }
+
+        private static Dictionary<string, Transform> CreateBoneTransformLookup(W3DHierarchy hierarchy, Dictionary<int, Transform> boneTransforms)
+        {
+            var lookup = new Dictionary<string, Transform>(StringComparer.OrdinalIgnoreCase);
+            if (hierarchy == null || boneTransforms == null)
+                return lookup;
+
+            for (int i = 0; i < hierarchy.Pivots.Count; i++)
+            {
+                var pivot = hierarchy.Pivots[i];
+                if (pivot == null || string.IsNullOrWhiteSpace(pivot.Name))
+                    continue;
+
+                if (boneTransforms.TryGetValue(i, out var boneTransform) && boneTransform != null && !lookup.ContainsKey(pivot.Name))
+                    lookup.Add(pivot.Name, boneTransform);
+            }
+
+            return lookup;
+        }
+
+        private static W3DHLodArray GetHighestDetailHLodArray(W3DHLod hlod)
+        {
+            if (hlod == null || hlod.LodArrays.Count == 0)
+                return null;
+
+            return hlod.LodArrays[hlod.LodArrays.Count - 1];
+        }
+
+        private bool BuildLodModel(W3DDataContext context, Transform root, Dictionary<string, W3DMesh> localMeshes)
+        {
+            if (context?.LodModel == null || context.LodModel.Levels.Count == 0)
+                return false;
+
+            for (int i = 0; i < context.LodModel.Levels.Count; i++)
+            {
+                var level = context.LodModel.Levels[i];
+                if (level == null || string.IsNullOrWhiteSpace(level.RenderObjName))
+                    continue;
+
+                var levelRoot = new GameObject(level.RenderObjName);
+                levelRoot.transform.SetParent(root, false);
+
+                bool built = false;
+                string localMeshName = GetRenderObjLeafName(level.RenderObjName);
+                if (localMeshes.TryGetValue(localMeshName, out var localMesh))
+                {
+                    var meshGo = W3DMeshBuilder.Build(localMesh, _textureResolver);
+                    meshGo.transform.SetParent(levelRoot.transform, false);
+                    built = true;
+                }
+                else if (TryLoadReferencedRenderObject(level.RenderObjName, context.SourcePath, out var referencedRoot))
+                {
+                    referencedRoot.transform.SetParent(levelRoot.transform, false);
+                    referencedRoot.transform.localPosition = Vector3.zero;
+                    referencedRoot.transform.localRotation = Quaternion.identity;
+                    referencedRoot.transform.localScale = Vector3.one;
+                    built = true;
+                }
+
+                if (!built)
+                {
+                    UnityEngine.Object.Destroy(levelRoot);
+                    Debug.LogWarning($"[W3D] LOD render object not found: {level.RenderObjName}");
+                    continue;
+                }
+
+                var renderers = levelRoot.GetComponentsInChildren<Renderer>(true);
+                if (renderers.Length == 0)
+                {
+                    UnityEngine.Object.Destroy(levelRoot);
+                    continue;
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryLoadReferencedRenderObject(string renderObjName, string sourcePath, out GameObject root)
+        {
+            root = null;
+            string path = ResolveRenderObjectPath(renderObjName);
+            if (string.IsNullOrEmpty(path))
+                return false;
+
+            string normalizedPath = Path.GetFullPath(path);
+            if (!string.IsNullOrWhiteSpace(sourcePath) &&
+                string.Equals(normalizedPath, Path.GetFullPath(sourcePath), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (_aggregateSubModelTemplateCache.TryGetValue(normalizedPath, out var template) && template != null)
+            {
+                root = UnityEngine.Object.Instantiate(template);
+                return true;
+            }
+
+            var context = W3DFileParser.Parse(normalizedPath);
+            root = new W3DSceneBuilder(_baseDirectory, _textureResolver, _aggregateSubModelTemplateCache).Build(context);
+            _aggregateSubModelTemplateCache[normalizedPath] = root;
+            return root != null;
+        }
+
+        private string ResolveRenderObjectPath(string renderObjName)
+        {
+            if (string.IsNullOrWhiteSpace(_baseDirectory) || !Directory.Exists(_baseDirectory))
+                return null;
+
+            foreach (var candidate in GetRenderObjectPathCandidates(renderObjName))
+            {
+                string path = Path.Combine(_baseDirectory, candidate + ".w3d");
+                if (File.Exists(path))
+                    return path;
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> GetRenderObjectPathCandidates(string renderObjName)
+        {
+            string normalized = (renderObjName ?? string.Empty).Trim();
+            if (normalized.Length == 0)
+                yield break;
+
+            yield return normalized.ToLowerInvariant();
+
+            int dot = normalized.IndexOf('.');
+            if (dot > 0)
+                yield return normalized.Substring(0, dot).ToLowerInvariant();
+
+            if (dot >= 0 && dot + 1 < normalized.Length)
+                yield return normalized.Substring(dot + 1).ToLowerInvariant();
+        }
+
+        private static string GetRenderObjLeafName(string renderObjName)
+        {
+            if (string.IsNullOrWhiteSpace(renderObjName))
+                return string.Empty;
+
+            int dot = renderObjName.IndexOf('.');
+            return dot >= 0 && dot + 1 < renderObjName.Length
+                ? renderObjName.Substring(dot + 1)
+                : renderObjName;
+        }
+
+        private static string[] GetW3dFiles(string baseDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(baseDirectory) || !Directory.Exists(baseDirectory))
+                return Array.Empty<string>();
+
+            if (SharedW3dFileListCache.TryGetValue(baseDirectory, out var cached))
+                return cached;
+
+            var files = Directory.GetFiles(baseDirectory, "*.w3d");
+            SharedW3dFileListCache[baseDirectory] = files;
+            return files;
         }
 
         private W3DHLod BuildHLodFromAggregate(W3DDataContext context, W3DDataContext baseModelContext)

@@ -88,9 +88,7 @@ namespace W3DImporter.Builders
 
                     var tri = w3dMesh.Triangles[i];
                     var indices = submeshTriangles[submeshIndex];
-                    indices.Add((int)tri.VertIds[0]);
-                    indices.Add((int)tri.VertIds[1]);
-                    indices.Add((int)tri.VertIds[2]);
+                    AddTriangleIfValid(indices, tri, mesh.vertexCount);
                 }
 
                 mesh.subMeshCount = usedBindings.Count;
@@ -101,14 +99,33 @@ namespace W3DImporter.Builders
                 return;
             }
 
-            var triangles = new int[w3dMesh.Triangles.Count * 3];
+            var triangles = new List<int>(w3dMesh.Triangles.Count * 3);
             for (int i = 0; i < w3dMesh.Triangles.Count; i++)
             {
-                triangles[i * 3 + 0] = (int)w3dMesh.Triangles[i].VertIds[0];
-                triangles[i * 3 + 1] = (int)w3dMesh.Triangles[i].VertIds[1];
-                triangles[i * 3 + 2] = (int)w3dMesh.Triangles[i].VertIds[2];
+                var tri = w3dMesh.Triangles[i];
+                AddTriangleIfValid(triangles, tri, mesh.vertexCount);
             }
-            mesh.triangles = triangles;
+            mesh.triangles = triangles.ToArray();
+        }
+
+        private static void AddTriangleIfValid(List<int> indices, W3DTriangle tri, int vertexCount)
+        {
+            if (!IsTriangleValid(tri, vertexCount))
+                return;
+
+            indices.Add((int)tri.VertIds[0]);
+            indices.Add((int)tri.VertIds[2]);
+            indices.Add((int)tri.VertIds[1]);
+        }
+
+        private static bool IsTriangleValid(W3DTriangle tri, int vertexCount)
+        {
+            if (tri == null || vertexCount <= 0)
+                return false;
+
+            return tri.VertIds[0] < vertexCount &&
+                   tri.VertIds[1] < vertexCount &&
+                   tri.VertIds[2] < vertexCount;
         }
 
         // E&B uses "D_LIGHT##" mesh-name markers for dynamic light placement at runtime.
@@ -394,17 +411,9 @@ namespace W3DImporter.Builders
 
             int texIdx = -1;
             int preferredStage = GetPreferredTextureStage(w3dMesh, matIndex);
-            if (w3dMesh.MaterialPasses.Count > 0)
-            {
-                var pass = w3dMesh.MaterialPasses[0];
-                if (preferredStage >= 0 && preferredStage < pass.TxStages.Count &&
-                    pass.TxStages[preferredStage].TxIds.Count > 0)
-                {
-                    var txIds = pass.TxStages[preferredStage].TxIds[0];
-                    if (txIds.Count > 0)
-                        texIdx = txIds[0];
-                }
-            }
+            var binding = W3DTextureAnimationResolver.ResolveStageTextureBinding(w3dMesh, matIndex, preferredStage);
+            if (binding != null)
+                texIdx = binding.TextureIndex;
 
             if (texIdx < 0 && matIndex < w3dMesh.Textures.Count)
                 texIdx = matIndex;
@@ -707,8 +716,7 @@ namespace W3DImporter.Builders
                 {
                     if (i < w3dMesh.DirectUVs.Count)
                     {
-                        var uv = w3dMesh.DirectUVs[i];
-                        directUVs[i] = new Vector2(uv.x, 1f - uv.y);
+                        directUVs[i] = ConvertTextureCoordinate(w3dMesh.DirectUVs[i]);
                     }
                     else
                     {
@@ -763,7 +771,7 @@ namespace W3DImporter.Builders
             for (int i = 0; i < mesh.vertexCount; i++)
             {
                 if (i < rawUVs.Count)
-                    finalUVs[i] = new Vector2(rawUVs[i].x, 1f - rawUVs[i].y);
+                    finalUVs[i] = ConvertTextureCoordinate(rawUVs[i]);
                 else
                     finalUVs[i] = Vector2.zero;
             }
@@ -785,8 +793,7 @@ namespace W3DImporter.Builders
                     {
                         if (i < txCoords2.Count)
                         {
-                            var uv = txCoords2[i];
-                            uv2[i] = new Vector2(uv.x, 1f - uv.y);
+                            uv2[i] = ConvertTextureCoordinate(txCoords2[i]);
                         }
                         else
                         {
@@ -797,6 +804,11 @@ namespace W3DImporter.Builders
                     mesh.uv2 = uv2;
                 }
             }
+        }
+
+        private static Vector2 ConvertTextureCoordinate(Vector2 uv)
+        {
+            return new Vector2(uv.x, 1f - uv.y);
         }
 
         private static void SetVertexColors(UnityEngine.Mesh mesh, W3DMesh w3dMesh)

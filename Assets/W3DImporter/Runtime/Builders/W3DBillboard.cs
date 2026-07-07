@@ -1,9 +1,18 @@
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace W3DImporter.Builders
 {
+    [ExecuteAlways]
     public sealed class W3DBillboard : MonoBehaviour
     {
+        // Imported ENB/CnC billboard quads present their visible face on local -X, not +X.
+        // Without this correction the billboard logic points the quad's back side at the camera,
+        // which makes asymmetric textures such as posters/signs read mirrored.
+        private static readonly Quaternion FacingCorrection = Quaternion.Euler(0f, 180f, 0f);
+
         public enum BillboardMode
         {
             CameraAligned,
@@ -20,10 +29,15 @@ namespace W3DImporter.Builders
             _initialLocalRotation = transform.localRotation;
         }
 
+        private void OnEnable()
+        {
+            _camera = null;
+        }
+
         private void LateUpdate()
         {
             if (_camera == null)
-                _camera = Camera.main;
+                _camera = ResolveCamera();
             if (_camera == null)
                 return;
 
@@ -54,12 +68,20 @@ namespace W3DImporter.Builders
                 }
                 case BillboardMode.CameraAligned:
                 {
-                    var toCamera = _camera.transform.position - transform.position;
-                    if (toCamera.sqrMagnitude <= 0.0001f)
+                    // Renegade uses the camera's Z axis here, not the vector from mesh to camera:
+                    //   tmp_world.Obj_Look_At(mesh_position, mesh_position + camera_z_vector, 0.0f)
+                    // Matrix3D::Look_At makes camera +Z point backward, so Unity's equivalent is
+                    // "-camera.forward". Using the mesh-to-camera vector makes nearby large quads
+                    // pivot around the eye position instead of staying screen-plane aligned.
+                    var cameraZ = -_camera.transform.forward;
+                    if (cameraZ.sqrMagnitude <= 0.0001f)
                         return;
-                    var right = toCamera.normalized;
+
+                    var right = cameraZ.normalized;
                     var up = _camera.transform.up;
                     var forward = Vector3.Cross(right, up).normalized;
+                    if (forward.sqrMagnitude <= 0.0001f)
+                        return;
                     up = Vector3.Cross(forward, right);
                     targetWorldRotation = Quaternion.LookRotation(forward, up);
                     break;
@@ -68,8 +90,25 @@ namespace W3DImporter.Builders
                     return;
             }
 
+            targetWorldRotation *= FacingCorrection;
+
             // Preserve the authored local rotation offset under the current parent bone.
             transform.localRotation = Quaternion.Inverse(parentRotation) * targetWorldRotation * _initialLocalRotation;
+        }
+
+        private static Camera ResolveCamera()
+        {
+            if (Camera.main != null)
+                return Camera.main;
+
+#if UNITY_EDITOR
+            if (SceneView.lastActiveSceneView != null && SceneView.lastActiveSceneView.camera != null)
+                return SceneView.lastActiveSceneView.camera;
+#endif
+
+            return Camera.current != null
+                ? Camera.current
+                : Object.FindAnyObjectByType<Camera>();
         }
     }
 }

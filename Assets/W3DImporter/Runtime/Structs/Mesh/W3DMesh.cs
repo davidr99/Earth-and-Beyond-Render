@@ -195,6 +195,7 @@ namespace W3DImporter.Structs.Mesh
         public List<W3DShader> Shaders = new List<W3DShader>();
         public List<W3DVertexMaterial> VertMaterials = new List<W3DVertexMaterial>();
         public List<W3DTexture> Textures = new List<W3DTexture>();
+        public List<int> LegacyMaterialTextureIds = new List<int>();
         public List<W3DMaterialPass> MaterialPasses = new List<W3DMaterialPass>();
         public List<W3DShaderMaterial> ShaderMaterials = new List<W3DShaderMaterial>();
         public List<Color32> DirectVertexColors = new List<Color32>();

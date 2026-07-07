@@ -84,6 +84,47 @@ namespace W3DImporter.Structs.Emitter
         public float SizeRandom;
     }
 
+    /// <summary>
+    /// EmitterLineProperties — chunk 0x509. Describes "line emitter" config
+    /// (W3D's beam/laser/trail emitters). Unsupported by Unity's particle
+    /// system as a unit, but parsing it lets the importer surface the data
+    /// for any custom downstream processing instead of silently dropping it.
+    /// 64-byte struct on disk.
+    /// </summary>
+    public class W3DEmitterLineProperties
+    {
+        public uint Flags;
+        public uint SubdivisionLevel;
+        public float NoiseAmplitude;
+        public float MergeAbortFactor;
+        public float TextureTileFactor;
+        public float UPerSec;
+        public float VPerSec;
+    }
+
+    /// <summary>
+    /// EmitterBlurTimeKeyframes — chunk 0x50C. Per-particle motion-blur
+    /// time keyframes. Layout: u32 count + f32 random + 4 bytes reserved
+    /// + count × {f32 time, f32 value}.
+    /// </summary>
+    public class W3DEmitterBlurTimeData
+    {
+        public float Random;
+        public List<W3DFloatKeyframe> Keyframes = new List<W3DFloatKeyframe>();
+    }
+
+    /// <summary>
+    /// EmitterExtraKeyframes — chunk 0x50D, EnB-specific. Same shape as the
+    /// other keyframe chunks (count + random + 8-byte pad + keys), purpose
+    /// undocumented but surfacing the data is valuable for E&B content
+    /// inspection. The on-disk pad is 8 bytes here, not 4 like blur-time.
+    /// </summary>
+    public class W3DEmitterExtraData
+    {
+        public float Random;
+        public List<W3DFloatKeyframe> Keyframes = new List<W3DFloatKeyframe>();
+    }
+
     public class W3DEmitter
     {
         public W3DEmitterHeader Header;
@@ -92,6 +133,9 @@ namespace W3DImporter.Structs.Emitter
         public W3DEmitterProps Props;
         public W3DEmitterRotationData RotationData;
         public W3DEmitterFrameData FrameData;
+        public W3DEmitterLineProperties LineProperties;
+        public W3DEmitterBlurTimeData BlurTimeData;
+        public W3DEmitterExtraData ExtraData;
         public string UserData = "";
 
         public string Name => Header?.Name ?? "Emitter";

@@ -5,26 +5,21 @@ using W3DImporter.Structs.Hierarchy;
 
 namespace W3DImporter.Builders
 {
-    // Converts W3D TimeCoded compressed animation (chunk 0x280, Flavor = 0) into a Unity
-    // AnimationClip. TimeCoded channels each carry their own timeCodes[] + data[] arrays.
-    // Channel types: 0/1/2 = scalar TX/TY/TZ, 3 = full quaternion (VectorLen = 4, xyzw per key).
-    // The TX/TY/TZ channels don't share timecodes, so we build a raw AnimationCurve per axis
-    // and then sample at the union of all keyframe times to apply the Z-up → Y-up basis
-    // rotation before writing out the final Unity curves.
-    //
-    // Flavor = 1 (AdaptiveDelta) uses per-bit quantized deltas and is not yet decoded.
+    // Converts W3D compressed animation (chunk 0x280) into a Unity AnimationClip.
+    // Both flavors arrive as W3DTimeCodedChannel keyframes: flavor 0 (TimeCoded) directly,
+    // flavor 1 (AdaptiveDelta) pre-decoded to one key per frame by the parser.
+    // Channel types match the uncompressed family: 0/1/2 = scalar TX/TY/TZ, 6 = full
+    // quaternion (VectorLen = 4, xyzw per key). A key whose NoInterp flag is set holds
+    // the previous key's value (stepped segment) instead of interpolating.
+    // The TX/TY/TZ channels don't share timecodes, so we build a raw AnimationCurve per
+    // axis and then sample at the union of all keyframe times to apply the Z-up → Y-up
+    // basis rotation before writing out the final Unity curves.
     public static class W3DCompressedAnimationBuilder
     {
         public static AnimationClip Build(W3DCompressedAnimation anim, W3DHierarchy hierarchy)
         {
             if (anim?.Header == null || hierarchy == null || hierarchy.Pivots.Count == 0)
                 return null;
-
-            if (anim.Header.Flavor != 0)
-            {
-                Debug.LogWarning($"[W3D] Compressed animation flavor {anim.Header.Flavor} (AdaptiveDelta) not yet supported; skipping '{anim.Header.Name}'.");
-                return null;
-            }
 
             float frameRate = anim.Header.FrameRate > 0f ? anim.Header.FrameRate : 30f;
             float frameDuration = 1f / frameRate;
@@ -46,8 +41,16 @@ namespace W3DImporter.Builders
                     slots = new W3DTimeCodedChannel[4];
                     byPivot[ch.Pivot] = slots;
                 }
-                if (ch.ChannelType >= 0 && ch.ChannelType < slots.Length)
-                    slots[ch.ChannelType] = ch;
+
+                // Only types 0/1/2/6 are kept for compressed animations; Euler types
+                // 3/4/5 are discarded (W3D_FORMAT.md §10.2).
+                switch (ch.ChannelType)
+                {
+                    case W3DTimeCodedChannelTypes.TranslationX: slots[0] = ch; break;
+                    case W3DTimeCodedChannelTypes.TranslationY: slots[1] = ch; break;
+                    case W3DTimeCodedChannelTypes.TranslationZ: slots[2] = ch; break;
+                    case W3DTimeCodedChannelTypes.Quaternion:   slots[3] = ch; break;
+                }
             }
 
             foreach (var kvp in byPivot)
@@ -58,18 +61,18 @@ namespace W3DImporter.Builders
                 var slots = kvp.Value;
                 var pivot = hierarchy.Pivots[kvp.Key];
 
-                var tx = slots[W3DTimeCodedChannelTypes.TranslationX];
-                var ty = slots[W3DTimeCodedChannelTypes.TranslationY];
-                var tz = slots[W3DTimeCodedChannelTypes.TranslationZ];
+                var tx = slots[0];
+                var ty = slots[1];
+                var tz = slots[2];
                 if (tx != null || ty != null || tz != null)
                     BuildTranslationCurves(clip, path, tx, ty, tz, pivot.Translation, frameDuration);
 
-                var quat = slots[W3DTimeCodedChannelTypes.Quaternion];
+                var quat = slots[3];
                 if (quat != null)
                     BuildRotationCurves(clip, path, quat, frameDuration);
             }
 
-            foreach (var bit in anim.BitChannels)
+            foreach (var bit in anim.CompressedBitChannels)
             {
                 if (bit.ChannelType != W3DBitChannelTypes.Visibility)
                     continue;
@@ -147,7 +150,8 @@ namespace W3DImporter.Builders
                     quat.Data[offset + 2],
                     quat.Data[offset + 3]);
 
-                var unity = W3DCoordinateConverter.ConvertRotation(w3d);
+                // AdaptiveDelta decoding accumulates error; keep quats unit-length.
+                var unity = W3DCoordinateConverter.ConvertRotation(w3d.normalized);
                 float t = quat.TimeCodes[i] * frameDuration;
 
                 cX.AddKey(t, unity.x);
@@ -156,21 +160,26 @@ namespace W3DImporter.Builders
                 cW.AddKey(t, unity.w);
             }
 
+            ApplyHoldSegments(quat, cX, cY, cZ, cW);
+
             clip.SetCurve(path, typeof(Transform), "localRotation.x", cX);
             clip.SetCurve(path, typeof(Transform), "localRotation.y", cY);
             clip.SetCurve(path, typeof(Transform), "localRotation.z", cZ);
             clip.SetCurve(path, typeof(Transform), "localRotation.w", cW);
         }
 
+        // Compressed bit channel: value at each timecode holds until the next timecode
+        // (client eval: "last entry with frame <= current"; W3D_FORMAT.md §10.2).
         private static void BuildVisibilityCurve(AnimationClip clip, string path,
-            W3DAnimationBitChannel bit, float frameDuration)
+            W3DCompressedBitChannel bit, float frameDuration)
         {
+            if (bit.TimeCodes.Count == 0)
+                return;
+
             var curve = new AnimationCurve();
-            int frameCount = bit.LastFrame - bit.FirstFrame + 1;
-            for (int f = 0; f < frameCount; f++)
+            foreach (var datum in bit.TimeCodes)
             {
-                bool visible = f < bit.Data.Count ? bit.Data[f] : bit.DefaultValue;
-                var key = new Keyframe((bit.FirstFrame + f) * frameDuration, visible ? 1f : 0f);
+                var key = new Keyframe(datum.TimeCode * frameDuration, datum.Value ? 1f : 0f);
                 key.inTangent = float.PositiveInfinity;
                 key.outTangent = float.PositiveInfinity;
                 curve.AddKey(key);
@@ -194,7 +203,38 @@ namespace W3DImporter.Builders
                 if (dataIdx >= ch.Data.Count) break;
                 curve.AddKey(ch.TimeCodes[i] * frameDuration, ch.Data[dataIdx]);
             }
+
+            ApplyHoldSegments(ch, curve);
             return curve;
+        }
+
+        // A key with NoInterp set means "hold the previous key until this one": make the
+        // preceding segment stepped by setting infinite tangents across it.
+        private static void ApplyHoldSegments(W3DTimeCodedChannel ch, params AnimationCurve[] curves)
+        {
+            if (ch.NoInterp.Count == 0)
+                return;
+
+            foreach (var curve in curves)
+            {
+                if (curve == null || curve.length < 2)
+                    continue;
+
+                var keys = curve.keys;
+                int count = Mathf.Min(keys.Length, ch.NoInterp.Count);
+                bool changed = false;
+                for (int i = 1; i < count; i++)
+                {
+                    if (!ch.NoInterp[i])
+                        continue;
+                    keys[i - 1].outTangent = float.PositiveInfinity;
+                    keys[i].inTangent = float.PositiveInfinity;
+                    changed = true;
+                }
+
+                if (changed)
+                    curve.keys = keys;
+            }
         }
 
         private static List<float> UnionTimes(params AnimationCurve[] curves)

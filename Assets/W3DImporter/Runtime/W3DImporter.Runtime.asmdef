@@ -1,7 +1,9 @@
 {
     "name": "W3DImporter.Runtime",
     "rootNamespace": "W3DImporter",
-    "references": [],
+    "references": [
+        "Unity.InputSystem"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

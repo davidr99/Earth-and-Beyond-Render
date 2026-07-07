@@ -13,7 +13,7 @@ namespace W3DImporter.Parsers
             var mesh = new W3DMesh();
             byte[] triangleChunkData = null;
             byte[] influenceChunkData = null;
-            bool sawEnbSpecificMeshData = false;
+            bool sawLegacyMaterials = false;
 
             foreach (var chunk in chunks.EnumerateChunks(chunkEnd))
             {
@@ -28,19 +28,16 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.VERTEX_NORMALS:
                         mesh.Normals = ReadVectorList(reader, chunk.ChunkEnd);
                         break;
-                    case W3DChunkTypes.ENB_UV_COORDS:
-                        sawEnbSpecificMeshData = true;
+                    case W3DChunkTypes.TEXCOORDS:
                         mesh.DirectUVs = ReadVector2List(reader, chunk.ChunkEnd);
                         break;
                     case W3DChunkTypes.TRIANGLES:
                         triangleChunkData = reader.ReadBytes((int)(chunk.ChunkEnd - reader.Position));
                         break;
-                    case W3DChunkTypes.ENB_PER_TRIANGLE_SHADER_INDEX:
-                        sawEnbSpecificMeshData = true;
+                    case W3DChunkTypes.PER_TRIANGLE_MATERIAL_IDS:
                         mesh.PerTriangleShaderIndices = ReadUInt16List(reader, chunk.ChunkEnd);
                         break;
-                    case W3DChunkTypes.ENB_MATERIAL_VERTEX_COLORS:
-                        sawEnbSpecificMeshData = true;
+                    case W3DChunkTypes.VERTEX_COLORS:
                         mesh.DirectVertexColors = ReadEnbVertexColors(reader, chunk.ChunkEnd);
                         break;
                     case W3DChunkTypes.VERTEX_INFLUENCES:
@@ -49,8 +46,10 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.MESH_USER_TEXT:
                         mesh.UserText = reader.ReadNullTerminatedString();
                         mesh.UserTextData = W3DUserTextParser.Parse(mesh.UserText);
-                        if (mesh.UserTextData?.EffectPass != null || mesh.UserTextData?.Surface != null)
-                            sawEnbSpecificMeshData = true;
+                        break;
+                    case W3DChunkTypes.MATERIALS3:
+                        ReadMaterials3(reader, chunks, chunk.ChunkEnd, mesh);
+                        sawLegacyMaterials = true;
                         break;
                     case W3DChunkTypes.VERTEX_SHADE_INDICES:
                         mesh.ShadeIds = ReadIntList(reader, chunk.ChunkEnd);
@@ -73,6 +72,16 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.MATERIAL_PASS:
                         mesh.MaterialPasses.Add(ReadMaterialPass(reader, chunks, chunk.ChunkEnd));
                         break;
+                    case W3DChunkTypes.PRELIT_UNLIT:
+                    case W3DChunkTypes.PRELIT_VERTEX:
+                    case W3DChunkTypes.PRELIT_LIGHTMAP_MULTI_PASS:
+                    case W3DChunkTypes.PRELIT_LIGHTMAP_MULTI_TEXTURE:
+                        if (ShouldUsePrelitContainer(mesh, chunk.ChunkType))
+                            ReadMaterialSet(reader, chunks, chunk.ChunkEnd, mesh, replaceExisting: true,
+                                prelitVertex: chunk.ChunkType == W3DChunkTypes.PRELIT_VERTEX);
+                        else
+                            chunks.SkipChunk(chunk);
+                        break;
                     default:
                         chunks.SkipChunk(chunk);
                         break;
@@ -81,10 +90,13 @@ namespace W3DImporter.Parsers
             }
 
             if (triangleChunkData != null)
-                mesh.Triangles = ReadTriangleList(triangleChunkData, mesh.Header, sawEnbSpecificMeshData);
+                mesh.Triangles = ReadTriangleList(triangleChunkData);
 
             if (influenceChunkData != null)
-                mesh.VertInfs = ReadVertexInfluences(influenceChunkData, mesh.Header, sawEnbSpecificMeshData);
+                mesh.VertInfs = ReadVertexInfluences(influenceChunkData);
+
+            if (sawLegacyMaterials)
+                ApplyLegacyMaterialBindings(mesh);
 
             return mesh;
         }
@@ -144,35 +156,15 @@ namespace W3DImporter.Parsers
             return list;
         }
 
-        private static List<W3DTriangle> ReadTriangleList(byte[] data, W3DMeshHeader header, bool preferEnb)
+        private static List<W3DTriangle> ReadTriangleList(byte[] data)
         {
             var list = new List<W3DTriangle>();
             using var stream = new MemoryStream(data);
             using var reader = new W3DBinaryReader(stream);
 
             long end = stream.Length;
-            int faceCount = header != null ? Mathf.Max(header.FaceCount, 0) : 0;
 
-            if (preferEnb && faceCount > 0 && end == faceCount * 32L)
-            {
-                while (reader.Position < end)
-                {
-                    var tri = new W3DTriangle();
-                    tri.VertIds[0] = reader.ReadUInt16();
-                    tri.VertIds[1] = reader.ReadUInt16();
-                    tri.VertIds[2] = reader.ReadUInt16();
-                    tri.Attrs = reader.ReadByte();
-                    reader.ReadByte();
-                    reader.Skip(12);
-                    tri.Dist = -reader.ReadFloat();
-                    reader.Skip(8);
-                    list.Add(tri);
-                }
-
-                return list;
-            }
-
-            while (reader.Position < end)
+            while (reader.Position + 32 <= end)
             {
                 var tri = new W3DTriangle();
                 tri.VertIds[0] = reader.ReadUInt32();
@@ -186,41 +178,25 @@ namespace W3DImporter.Parsers
             return list;
         }
 
-        private static List<W3DVertexInfluence> ReadVertexInfluences(byte[] data, W3DMeshHeader header, bool preferEnb)
+        private static List<W3DVertexInfluence> ReadVertexInfluences(byte[] data)
         {
             var list = new List<W3DVertexInfluence>();
             using var stream = new MemoryStream(data);
             using var reader = new W3DBinaryReader(stream);
 
             long end = stream.Length;
-            int vertCount = header != null ? Mathf.Max(header.VertCount, 0) : 0;
 
-            if (preferEnb && vertCount > 0 && end == vertCount * 8L)
+            while (reader.Position + 8 <= end)
             {
-                while (reader.Position < end)
+                var vi = new W3DVertexInfluence
                 {
-                    var vi = new W3DVertexInfluence
-                    {
-                        BoneIdx = reader.ReadUInt16(),
-                        XtraIdx = 0,
-                        BoneInf = 1f,
-                        XtraInf = 0f
-                    };
+                    BoneIdx = reader.ReadUInt16(),
+                    XtraIdx = 0,
+                    BoneInf = 1f,
+                    XtraInf = 0f
+                };
 
-                    reader.Skip(6);
-                    list.Add(vi);
-                }
-
-                return list;
-            }
-
-            while (reader.Position < end)
-            {
-                var vi = new W3DVertexInfluence();
-                vi.BoneIdx = reader.ReadUInt16();
-                vi.XtraIdx = reader.ReadUInt16();
-                vi.BoneInf = (float)reader.ReadUInt16() / 100f;
-                vi.XtraInf = (float)reader.ReadUInt16() / 100f;
+                reader.Skip(6);
                 list.Add(vi);
             }
             return list;
@@ -248,6 +224,272 @@ namespace W3DImporter.Parsers
             info.ShaderCount = reader.ReadInt32();
             info.TextureCount = reader.ReadInt32();
             return info;
+        }
+
+        private static void ReadMaterialSet(W3DBinaryReader reader, W3DChunkReader chunks, long end, W3DMesh mesh, bool replaceExisting, bool prelitVertex = false)
+        {
+            if (replaceExisting)
+            {
+                mesh.MatInfo = null;
+                mesh.Shaders.Clear();
+                mesh.VertMaterials.Clear();
+                mesh.Textures.Clear();
+                mesh.LegacyMaterialTextureIds.Clear();
+                mesh.MaterialPasses.Clear();
+                mesh.ShaderMaterials.Clear();
+            }
+
+            foreach (var chunk in chunks.EnumerateChunks(end))
+            {
+                switch (chunk.ChunkType)
+                {
+                    case W3DChunkTypes.MATERIAL_INFO:
+                        mesh.MatInfo = ReadMaterialInfo(reader);
+                        break;
+                    case W3DChunkTypes.SHADERS:
+                        mesh.Shaders = ReadShaderList(reader, chunk.ChunkEnd);
+                        break;
+                    case W3DChunkTypes.VERTEX_MATERIALS:
+                        mesh.VertMaterials = ReadVertexMaterials(reader, chunks, chunk.ChunkEnd);
+                        break;
+                    case W3DChunkTypes.TEXTURES:
+                        mesh.Textures = ReadTextures(reader, chunks, chunk.ChunkEnd);
+                        break;
+                    case W3DChunkTypes.MATERIAL_PASS:
+                        mesh.MaterialPasses.Add(ReadMaterialPass(reader, chunks, chunk.ChunkEnd, prelitVertex));
+                        break;
+                    default:
+                        chunks.SkipChunk(chunk);
+                        break;
+                }
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+        }
+
+        private static bool ShouldUsePrelitContainer(W3DMesh mesh, uint chunkType)
+        {
+            uint attrs = mesh?.Header?.Attrs ?? 0u;
+            uint prelit = attrs & 0x0F000000u;
+            uint selected = prelit switch
+            {
+                0x02000000u => W3DChunkTypes.PRELIT_VERTEX,
+                0x04000000u => W3DChunkTypes.PRELIT_LIGHTMAP_MULTI_PASS,
+                0x08000000u => W3DChunkTypes.PRELIT_LIGHTMAP_MULTI_TEXTURE,
+                _ => W3DChunkTypes.PRELIT_UNLIT
+            };
+
+            if (prelit != 0)
+                return chunkType == selected;
+
+            return chunkType == W3DChunkTypes.PRELIT_UNLIT &&
+                   mesh.VertMaterials.Count == 0 &&
+                   mesh.MaterialPasses.Count == 0 &&
+                   mesh.Textures.Count == 0;
+        }
+
+        private static void ReadMaterials3(W3DBinaryReader reader, W3DChunkReader chunks, long end, W3DMesh mesh)
+        {
+            while (reader.Position < end)
+            {
+                var chunk = chunks.ReadChunkHeader();
+                if (chunk.ChunkType == W3DChunkTypes.MATERIAL3)
+                    ReadMaterial3(reader, chunks, chunk.ChunkEnd, mesh);
+                else
+                    chunks.SkipChunk(chunk);
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+        }
+
+        private static void ReadMaterial3(W3DBinaryReader reader, W3DChunkReader chunks, long end, W3DMesh mesh)
+        {
+            string name = "";
+            W3DVertexMaterialInfo info = null;
+            Color rawDiffuse = Color.white;
+            string diffuseTexture = "";
+            string selfIllumTexture = "";
+
+            foreach (var chunk in chunks.EnumerateChunks(end))
+            {
+                switch (chunk.ChunkType)
+                {
+                    case W3DChunkTypes.MATERIAL3_NAME:
+                        name = reader.ReadNullTerminatedString();
+                        break;
+                    case W3DChunkTypes.MATERIAL3_INFO:
+                        info = ReadMaterial3Info(reader, out rawDiffuse);
+                        break;
+                    case W3DChunkTypes.MATERIAL3_DC_MAP:
+                        diffuseTexture = ReadMap3TextureName(reader, chunks, chunk.ChunkEnd);
+                        break;
+                    case W3DChunkTypes.MATERIAL3_SI_MAP:
+                        selfIllumTexture = ReadMap3TextureName(reader, chunks, chunk.ChunkEnd);
+                        break;
+                    default:
+                        chunks.SkipChunk(chunk);
+                        break;
+                }
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+
+            if (info == null)
+                info = new W3DVertexMaterialInfo { Diffuse = Color.white, Ambient = Color.white };
+
+            // Client honors the SI map only when the RAW DiffuseColor is (0,0,0) — before
+            // the DiffuseCoeffs multiply (W3D_FORMAT.md §5).
+            bool useSelfIllum = !string.IsNullOrWhiteSpace(selfIllumTexture) &&
+                                rawDiffuse.r <= 0.001f &&
+                                rawDiffuse.g <= 0.001f &&
+                                rawDiffuse.b <= 0.001f;
+
+            int materialIndex = mesh.VertMaterials.Count;
+            mesh.VertMaterials.Add(new W3DVertexMaterial
+            {
+                Name = string.IsNullOrWhiteSpace(name) ? $"MATERIAL3_{materialIndex}" : name,
+                Info = info
+            });
+
+            string textureName = useSelfIllum ? selfIllumTexture : diffuseTexture;
+            int textureIndex = -1;
+            if (!string.IsNullOrWhiteSpace(textureName))
+            {
+                textureIndex = mesh.Textures.Count;
+                mesh.Textures.Add(new W3DTexture
+                {
+                    Id = textureName,
+                    File = textureName
+                });
+            }
+
+            mesh.LegacyMaterialTextureIds.Add(textureIndex);
+            mesh.Shaders.Add(CreateMaterial3Shader(info, useSelfIllum));
+        }
+
+        private static W3DVertexMaterialInfo ReadMaterial3Info(W3DBinaryReader reader, out Color rawDiffuse)
+        {
+            var info = new W3DVertexMaterialInfo();
+            info.Attributes = reader.ReadUInt32();
+            var diffuse = ReadColor(reader);
+            rawDiffuse = diffuse;
+            var specular = ReadColor(reader);
+            var emissive = ReadColor(reader);
+            var ambient = ReadColor(reader);
+            var diffuseCoeffs = ReadColor(reader);
+            var specularCoeffs = ReadColor(reader);
+
+            info.Diffuse = MultiplyRgb(diffuse, diffuseCoeffs);
+            info.Specular = MultiplyRgb(specular, specularCoeffs);
+            info.Emissive = emissive;
+            info.Ambient = ambient;
+            info.Shininess = reader.ReadFloat();
+            info.Opacity = reader.ReadFloat();
+            info.Translucency = reader.ReadFloat();
+            reader.ReadFloat(); // FogCoeff
+            return info;
+        }
+
+        private static string ReadMap3TextureName(W3DBinaryReader reader, W3DChunkReader chunks, long end)
+        {
+            string textureName = "";
+
+            foreach (var chunk in chunks.EnumerateChunks(end))
+            {
+                switch (chunk.ChunkType)
+                {
+                    case W3DChunkTypes.MAP3_FILENAME:
+                        textureName = reader.ReadNullTerminatedString();
+                        break;
+                    case W3DChunkTypes.MAP3_INFO:
+                        chunks.SkipChunk(chunk);
+                        break;
+                    default:
+                        chunks.SkipChunk(chunk);
+                        break;
+                }
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+
+            return textureName;
+        }
+
+        private static W3DShader CreateMaterial3Shader(W3DVertexMaterialInfo info, bool additive)
+        {
+            var shader = new W3DShader
+            {
+                DepthCompare = 1,
+                DepthMask = 1,
+                ColorMask = 1,
+                SrcBlend = 1,
+                DestBlend = 0,
+                Texturing = 1
+            };
+
+            if (additive)
+            {
+                shader.DepthMask = 0;
+                shader.SrcBlend = 1;
+                shader.DestBlend = 1;
+            }
+            // Only MATERIAL3 attribute bit 0 enables alpha blending in the client
+            // (W3D_FORMAT.md §5); Opacity/Translucency do not switch the blend mode.
+            else if (info != null && (info.Attributes & 0x1u) != 0)
+            {
+                shader.DepthMask = 0;
+                shader.SrcBlend = 2;
+                shader.DestBlend = 5;
+            }
+
+            return shader;
+        }
+
+        private static void ApplyLegacyMaterialBindings(W3DMesh mesh)
+        {
+            if (mesh.MaterialPasses.Count > 0 || mesh.VertMaterials.Count == 0)
+                return;
+
+            var pass = new W3DMaterialPass();
+            var stage = new W3DTextureStage();
+            var textureIds = new List<int>();
+
+            bool hasPerFaceMaterials = mesh.PerTriangleShaderIndices.Count == mesh.Triangles.Count && mesh.Triangles.Count > 0;
+            if (hasPerFaceMaterials)
+            {
+                for (int i = 0; i < mesh.PerTriangleShaderIndices.Count; i++)
+                {
+                    int materialId = Mathf.Clamp(mesh.PerTriangleShaderIndices[i], 0, mesh.VertMaterials.Count - 1);
+                    pass.VertexMaterialIds.Add(materialId);
+                    pass.ShaderIds.Add(materialId < mesh.Shaders.Count ? materialId : -1);
+                    textureIds.Add(GetLegacyMaterialTextureId(mesh, materialId));
+                }
+            }
+            else
+            {
+                pass.VertexMaterialIds.Add(0);
+                pass.ShaderIds.Add(mesh.Shaders.Count > 0 ? 0 : -1);
+                textureIds.Add(GetLegacyMaterialTextureId(mesh, 0));
+            }
+
+            stage.TxIds.Add(textureIds);
+            pass.TxStages.Add(stage);
+            mesh.MaterialPasses.Add(pass);
+        }
+
+        private static int GetLegacyMaterialTextureId(W3DMesh mesh, int materialId)
+        {
+            if (mesh.LegacyMaterialTextureIds.Count == 0)
+                return materialId < mesh.Textures.Count ? materialId : -1;
+
+            return materialId >= 0 && materialId < mesh.LegacyMaterialTextureIds.Count
+                ? mesh.LegacyMaterialTextureIds[materialId]
+                : -1;
+        }
+
+        private static Color MultiplyRgb(Color color, Color multiplier)
+        {
+            return new Color(color.r * multiplier.r, color.g * multiplier.g, color.b * multiplier.b, color.a);
         }
 
         private static List<W3DShader> ReadShaderList(W3DBinaryReader reader, long end)
@@ -380,7 +622,7 @@ namespace W3DImporter.Parsers
             return list;
         }
 
-        private static W3DMaterialPass ReadMaterialPass(W3DBinaryReader reader, W3DChunkReader chunks, long end)
+        private static W3DMaterialPass ReadMaterialPass(W3DBinaryReader reader, W3DChunkReader chunks, long end, bool prelitVertex = false)
         {
             var pass = new W3DMaterialPass();
             foreach (var chunk in chunks.EnumerateChunks(end))
@@ -400,12 +642,58 @@ namespace W3DImporter.Parsers
                             pass.ShaderMaterialIds.Add(reader.ReadInt32());
                         break;
                     case W3DChunkTypes.DCG:
-                        while (reader.Position < chunk.ChunkEnd)
-                            pass.Dcg.Add(reader.ReadRGBA());
+                        // Second DCG in a PRELIT_VERTEX container replaces only the alpha
+                        // channel of the existing per-vertex colors (W3D_FORMAT.md §3.3).
+                        if (prelitVertex && pass.Dcg.Count > 0)
+                        {
+                            int dcgIndex = 0;
+                            while (reader.Position < chunk.ChunkEnd)
+                            {
+                                var replacement = reader.ReadRGBA();
+                                if (dcgIndex < pass.Dcg.Count)
+                                {
+                                    var existing = pass.Dcg[dcgIndex];
+                                    existing.a = replacement.a;
+                                    pass.Dcg[dcgIndex] = existing;
+                                }
+                                dcgIndex++;
+                            }
+                        }
+                        else
+                        {
+                            while (reader.Position < chunk.ChunkEnd)
+                                pass.Dcg.Add(reader.ReadRGBA());
+                        }
                         break;
                     case W3DChunkTypes.DIG:
-                        while (reader.Position < chunk.ChunkEnd)
-                            pass.Dig.Add(reader.ReadRGBA());
+                        // DIG alpha is forced opaque; a second DIG multiplies into the
+                        // existing colors (W3D_FORMAT.md §3.3).
+                        if (pass.Dig.Count > 0)
+                        {
+                            int digIndex = 0;
+                            while (reader.Position < chunk.ChunkEnd)
+                            {
+                                var factor = reader.ReadRGBA();
+                                if (digIndex < pass.Dig.Count)
+                                {
+                                    var existing = pass.Dig[digIndex];
+                                    existing.r = (byte)(existing.r * factor.r / 255);
+                                    existing.g = (byte)(existing.g * factor.g / 255);
+                                    existing.b = (byte)(existing.b * factor.b / 255);
+                                    pass.Dig[digIndex] = existing;
+                                }
+                                digIndex++;
+                            }
+                        }
+                        else
+                        {
+                            while (reader.Position < chunk.ChunkEnd)
+                            {
+                                var dig = reader.ReadRGBA();
+                                dig.a = 255;
+                                pass.Dig.Add(dig);
+                            }
+                        }
                         break;
                     case W3DChunkTypes.SCG:
                         while (reader.Position < chunk.ChunkEnd)

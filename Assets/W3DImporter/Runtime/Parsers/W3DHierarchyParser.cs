@@ -44,7 +44,33 @@ namespace W3DImporter.Parsers
                 }
                 reader.Seek(chunk.ChunkEnd);
             }
+
+            SynthesizeLegacyRoot(hierarchy);
             return hierarchy;
+        }
+
+        // Hierarchies with Version < 0x30000 get a synthetic "RootTransform" pivot 0
+        // prepended by the client; all parent indices shift +1, so the original root's
+        // ParentIdx of -1 becomes 0 (W3D_FORMAT.md §9). HLOD/animation pivot indices in
+        // such files assume the shifted table.
+        private static void SynthesizeLegacyRoot(W3DHierarchy hierarchy)
+        {
+            if (hierarchy.Header == null || hierarchy.Header.Version >= 0x30000 || hierarchy.Pivots.Count == 0)
+                return;
+
+            foreach (var pivot in hierarchy.Pivots)
+                pivot.ParentId += 1;
+
+            hierarchy.Pivots.Insert(0, new W3DHierarchyPivot
+            {
+                Name = "RootTransform",
+                ParentId = -1,
+                Translation = Vector3.zero,
+                EulerAngles = Vector3.zero,
+                Rotation = Quaternion.identity
+            });
+
+            hierarchy.Header.PivotCount = hierarchy.Pivots.Count;
         }
     }
 }
