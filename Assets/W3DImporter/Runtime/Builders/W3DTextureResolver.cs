@@ -7,7 +7,14 @@ namespace W3DImporter.Builders
 {
     public class W3DTextureResolver
     {
-        private static readonly string[] Extensions = { ".png", ".jpg", ".jpeg", ".dds", ".tga", ".bmp" };
+        // AI-upscaled .png files sit alongside the original .dds/.tga game textures.
+        // When true they take priority; when false the originals load. Textures are
+        // cached per load, so callers must reload the model after flipping this.
+        public static bool UseUpscaledPngs = true;
+
+        private static readonly string[] ExtensionsWithPng = { ".png", ".jpg", ".jpeg", ".dds", ".tga", ".bmp" };
+        private static readonly string[] ExtensionsWithoutPng = { ".jpg", ".jpeg", ".dds", ".tga", ".bmp" };
+        private static string[] Extensions => UseUpscaledPngs ? ExtensionsWithPng : ExtensionsWithoutPng;
         private static readonly Regex TrailingDigitsRegex = new Regex(@"^(.*?)(\d+)$", RegexOptions.Compiled);
         private readonly string _baseDirectory;
         private readonly Dictionary<string, Texture2D> _cache = new Dictionary<string, Texture2D>();
@@ -113,9 +120,17 @@ namespace W3DImporter.Builders
                     var tex = new Texture2D(2, 2, TextureFormat.RGBA32, true);
                     if (tex.LoadImage(data))
                     {
+                        // LoadImage fills rows bottom-up (image displays upright), but the
+                        // raw DDS loader uploads rows top-down and the mesh V-flip is
+                        // calibrated to THAT orientation — flip so both paths match.
+                        FlipVertically(tex);
                         tex.name = Path.GetFileNameWithoutExtension(path);
                         tex.wrapMode = TextureWrapMode.Repeat;
-                        tex.filterMode = FilterMode.Bilinear;
+                        // The DDS path has no mip chain and always samples sharp mip 0;
+                        // PNGs have mips, so without trilinear + high aniso the upscaled
+                        // detail is filtered away at any distance or viewing angle.
+                        tex.filterMode = FilterMode.Trilinear;
+                        tex.anisoLevel = 16;
                         Debug.Log($"[W3D] Loaded: {path}");
                         return tex;
                     }
@@ -135,6 +150,23 @@ namespace W3DImporter.Builders
             }
 
             return null;
+        }
+
+        private static void FlipVertically(Texture2D tex)
+        {
+            var pixels = tex.GetPixels32();
+            int w = tex.width, h = tex.height;
+            for (int y = 0; y < h / 2; y++)
+            {
+                int top = y * w;
+                int bottom = (h - 1 - y) * w;
+                for (int x = 0; x < w; x++)
+                {
+                    (pixels[top + x], pixels[bottom + x]) = (pixels[bottom + x], pixels[top + x]);
+                }
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply(true);
         }
 
         private Texture2D LoadDDS(string path)

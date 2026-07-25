@@ -230,6 +230,14 @@ namespace W3DImporter
                 ApplyVisibilityFilters();
             }
 
+            bool useUpscaled = GUILayout.Toggle(W3DTextureResolver.UseUpscaledPngs, "Use Upscaled Textures (PNG)");
+            if (useUpscaled != W3DTextureResolver.UseUpscaledPngs)
+            {
+                W3DTextureResolver.UseUpscaledPngs = useUpscaled;
+                if (_loadedModel != null && File.Exists(_filePath))
+                    LoadModel(_filePath);   // textures are cached per load; rebuild with the new preference
+            }
+
             DrawLightingControls();
 
             GUILayout.Label(_statusMessage);
