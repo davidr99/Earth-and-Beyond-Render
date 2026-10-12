@@ -51,7 +51,12 @@ namespace W3DImporter
         private Vector3 _flyPosition;
         private float _flyYaw;
         private float _flyPitch;
+        // fly speed in units per second: set from the model size when a model is framed and
+        // multiplied by FlySpeedStep per scroll notch
         private float _flyMoveSpeed = 8f;
+        private const float FlySpeedMin = 0.5f;
+        private const float FlySpeedMax = 5000f;
+        private const float FlySpeedStep = 1.25f;
         private Camera _viewerCamera;
         private Camera _presentationCamera;
         private CameraClearFlags _savedClearFlags;
@@ -164,7 +169,7 @@ namespace W3DImporter
 
             if (Mathf.Abs(_scrollDelta) > Mathf.Epsilon)
             {
-                _flyMoveSpeed = Mathf.Clamp(_flyMoveSpeed + (_scrollDelta * 0.4f), 1f, 60f);
+                _flyMoveSpeed = Mathf.Clamp(_flyMoveSpeed * Mathf.Pow(FlySpeedStep, _scrollDelta), FlySpeedMin, FlySpeedMax);
                 _scrollDelta = 0f;
             }
 
@@ -181,7 +186,9 @@ namespace W3DImporter
             {
                 float speed = _flyMoveSpeed;
                 if (IsKeyHeld(KeyCode.LeftShift) || IsKeyHeld(KeyCode.RightShift))
-                    speed *= 3f;
+                    speed *= 4f;
+                if (IsKeyHeld(KeyCode.LeftControl) || IsKeyHeld(KeyCode.RightControl))
+                    speed *= 0.25f;
 
                 _flyPosition += lookRotation * localMove.normalized * speed * Time.deltaTime;
             }
@@ -243,7 +250,7 @@ namespace W3DImporter
             GUILayout.Label(_statusMessage);
             GUILayout.Label(_cameraMode == ViewerCameraMode.Orbit
                 ? "Orbit: right-drag rotate, scroll zoom"
-                : $"Fly: right-drag look, WASD move, Q/E rise, Shift boost, scroll speed ({_flyMoveSpeed:0.0})");
+                : $"Fly: right-drag look, WASD move, Q/E rise, Shift fast, Ctrl slow, scroll speed ({_flyMoveSpeed:0.#})");
 
             GUILayout.EndVertical();
             GUILayout.EndArea();
@@ -349,6 +356,8 @@ namespace W3DImporter
             float radius = Mathf.Max(bounds.extents.magnitude, 1f);
             _distance = radius * 3f;
             _maxOrbitDistance = Mathf.Max(_distance * 4f, 200f);
+            // cross the model in a few seconds (interiors are hundreds of units across)
+            _flyMoveSpeed = Mathf.Clamp(radius * 0.5f, 4f, FlySpeedMax);
 
             var cam = ResolveViewerCamera();
             if (cam == null)
@@ -452,6 +461,8 @@ namespace W3DImporter
                 KeyCode.E => keyboard.eKey.isPressed,
                 KeyCode.LeftShift => keyboard.leftShiftKey.isPressed,
                 KeyCode.RightShift => keyboard.rightShiftKey.isPressed,
+                KeyCode.LeftControl => keyboard.leftCtrlKey.isPressed,
+                KeyCode.RightControl => keyboard.rightCtrlKey.isPressed,
                 _ => false
             };
 #elif ENABLE_LEGACY_INPUT_MANAGER
