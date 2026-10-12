@@ -58,6 +58,13 @@ namespace W3DImporter.IO
             return sb.ToString();
         }
 
+        // String that fills the rest of a chunk (NUL terminated, possibly padded).
+        public string ReadStringToEnd(long end)
+        {
+            long length = end - Position;
+            return length > 0 ? ReadString((int)length) : string.Empty;
+        }
+
         public string ReadString(int length)
         {
             byte[] bytes = _reader.ReadBytes(length);

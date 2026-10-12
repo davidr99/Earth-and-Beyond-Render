@@ -42,7 +42,8 @@ namespace W3DImporter.Editor
                 }
             }
 
-            foreach (var mr in root.GetComponentsInChildren<MeshRenderer>(true))
+            // Renderer covers MeshRenderer and the SkinnedMeshRenderer used for skins
+            foreach (var mr in root.GetComponentsInChildren<Renderer>(true))
             {
                 if (mr.sharedMaterials != null)
                 {

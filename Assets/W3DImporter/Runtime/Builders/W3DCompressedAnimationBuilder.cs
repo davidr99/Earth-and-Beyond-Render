@@ -65,11 +65,11 @@ namespace W3DImporter.Builders
                 var ty = slots[1];
                 var tz = slots[2];
                 if (tx != null || ty != null || tz != null)
-                    BuildTranslationCurves(clip, path, tx, ty, tz, pivot.Translation, frameDuration);
+                    BuildTranslationCurves(clip, path, tx, ty, tz, pivot, frameDuration);
 
                 var quat = slots[3];
                 if (quat != null)
-                    BuildRotationCurves(clip, path, quat, frameDuration);
+                    BuildRotationCurves(clip, path, quat, pivot, frameDuration);
             }
 
             foreach (var bit in anim.CompressedBitChannels)
@@ -98,38 +98,69 @@ namespace W3DImporter.Builders
             return paths;
         }
 
+        // Channel values are deltas on top of the pivot's base pose (see W3DAnimationBuilder).
         private static void BuildTranslationCurves(AnimationClip clip, string path,
             W3DTimeCodedChannel tx, W3DTimeCodedChannel ty, W3DTimeCodedChannel tz,
-            Vector3 basePoseW3D, float frameDuration)
+            W3DHierarchyPivot pivot, float frameDuration)
         {
-            var rawX = ToScalarCurve(tx, basePoseW3D.x, frameDuration);
-            var rawY = ToScalarCurve(ty, basePoseW3D.y, frameDuration);
-            var rawZ = ToScalarCurve(tz, basePoseW3D.z, frameDuration);
+            var rawX = ToScalarCurve(tx, 0f, frameDuration);
+            var rawY = ToScalarCurve(ty, 0f, frameDuration);
+            var rawZ = ToScalarCurve(tz, 0f, frameDuration);
 
             var times = UnionTimes(rawX, rawY, rawZ);
             if (times.Count == 0) return;
+
+            // A stepped key jumps at its own time; sample just before it as well so the merged,
+            // linearly interpolated curves still hold the previous value up to the jump.
+            var holdTimes = new HashSet<float>();
+            AddHoldTimes(tx, frameDuration, holdTimes);
+            AddHoldTimes(ty, frameDuration, holdTimes);
+            AddHoldTimes(tz, frameDuration, holdTimes);
+            float epsilon = frameDuration * 0.001f;
+            var sampleTimes = new List<float>(times);
+            foreach (var t in holdTimes)
+            {
+                if (t - epsilon > 0f)
+                    sampleTimes.Add(t - epsilon);
+            }
+            sampleTimes.Sort();
 
             var cX = new AnimationCurve();
             var cY = new AnimationCurve();
             var cZ = new AnimationCurve();
 
-            foreach (var t in times)
+            foreach (var t in sampleTimes)
             {
-                var unity = W3DCoordinateConverter.ConvertPosition(new Vector3(
+                var unity = W3DAnimationBuilder.ComposeTranslation(pivot, new Vector3(
                     rawX.Evaluate(t), rawY.Evaluate(t), rawZ.Evaluate(t)));
                 cX.AddKey(t, unity.x);
                 cY.AddKey(t, unity.y);
                 cZ.AddKey(t, unity.z);
             }
 
+            W3DAnimationBuilder.MakeLinear(cX);
+            W3DAnimationBuilder.MakeLinear(cY);
+            W3DAnimationBuilder.MakeLinear(cZ);
             clip.SetCurve(path, typeof(Transform), "localPosition.x", cX);
             clip.SetCurve(path, typeof(Transform), "localPosition.y", cY);
             clip.SetCurve(path, typeof(Transform), "localPosition.z", cZ);
         }
 
+        private static void AddHoldTimes(W3DTimeCodedChannel ch, float frameDuration, HashSet<float> holdTimes)
+        {
+            if (ch == null)
+                return;
+            int count = Mathf.Min(ch.TimeCodes.Count, ch.NoInterp.Count);
+            for (int i = 1; i < count; i++)
+            {
+                if (ch.NoInterp[i])
+                    holdTimes.Add(ch.TimeCodes[i] * frameDuration);
+            }
+        }
+
         // Quaternion channel: VectorLen = 4, data[i*4 + 0..3] = (x, y, z, w) at timeCodes[i].
         private static void BuildRotationCurves(AnimationClip clip, string path,
-            W3DTimeCodedChannel quat, float frameDuration)
+            W3DTimeCodedChannel quat, W3DHierarchyPivot pivot, float frameDuration)
         {
             if (quat.VectorLen != 4 || quat.TimeCodes.Count == 0)
                 return;
@@ -151,7 +182,7 @@ namespace W3DImporter.Builders
                     quat.Data[offset + 3]);
 
                 // AdaptiveDelta decoding accumulates error; keep quats unit-length.
-                var unity = W3DCoordinateConverter.ConvertRotation(w3d.normalized);
+                var unity = W3DAnimationBuilder.ComposeRotation(pivot, w3d.normalized);
                 float t = quat.TimeCodes[i] * frameDuration;
 
                 cX.AddKey(t, unity.x);
@@ -160,6 +191,10 @@ namespace W3DImporter.Builders
                 cW.AddKey(t, unity.w);
             }
 
+            W3DAnimationBuilder.MakeLinear(cX);
+            W3DAnimationBuilder.MakeLinear(cY);
+            W3DAnimationBuilder.MakeLinear(cZ);
+            W3DAnimationBuilder.MakeLinear(cW);
             ApplyHoldSegments(quat, cX, cY, cZ, cW);
 
             clip.SetCurve(path, typeof(Transform), "localRotation.x", cX);
@@ -204,6 +239,7 @@ namespace W3DImporter.Builders
                 curve.AddKey(ch.TimeCodes[i] * frameDuration, ch.Data[dataIdx]);
             }
 
+            W3DAnimationBuilder.MakeLinear(curve);
             ApplyHoldSegments(ch, curve);
             return curve;
         }

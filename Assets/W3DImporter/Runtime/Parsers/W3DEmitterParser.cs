@@ -21,11 +21,16 @@ namespace W3DImporter.Parsers
                         };
                         break;
                     case W3DChunkTypes.EMITTER_USER_DATA:
+                    {
+                        // 12-byte header {u32 type; u32 stringLength; u32 reserved} followed by the string
                         uint type = reader.ReadUInt32();
-                        int strLen = reader.ReadInt32();
+                        long strLen = reader.ReadInt32();
+                        reader.Skip(4);
+                        strLen = System.Math.Min(strLen, chunk.ChunkEnd - reader.Position);
                         if (strLen > 0)
-                            emitter.UserData = reader.ReadString(strLen);
+                            emitter.UserData = reader.ReadString((int)strLen);
                         break;
+                    }
                     case W3DChunkTypes.EMITTER_INFO:
                         emitter.Info = ReadEmitterInfo(reader);
                         break;

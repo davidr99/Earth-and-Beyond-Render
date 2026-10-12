@@ -21,6 +21,7 @@ Shader "W3D/Particle"
         [Toggle] _ZWrite ("ZWrite", Float) = 0
         _DetailColorFunc ("Detail Color Func", Float) = 0
         _DetailAlphaFunc ("Detail Alpha Func", Float) = 0
+        _PriGradient ("Primary Gradient", Float) = 1
         _DetailUseUV2 ("Detail Uses UV2", Float) = 1
     }
 
@@ -38,6 +39,7 @@ Shader "W3D/Particle"
             #pragma vertex vert
             #pragma fragment frag
             #include "UnityCG.cginc"
+            #include "W3DCombine.hlsl"
 
             struct appdata
             {
@@ -70,38 +72,14 @@ Shader "W3D/Particle"
             float _FlipBackfaceU;
             float _DetailColorFunc;
             float _DetailAlphaFunc;
+            float _PriGradient;
             float _DetailUseUV2;
             float4 _W3DViewerAmbientColor;
             float4 _W3DViewerLightDirection;
             float4 _W3DViewerLightColor;
             float _W3DViewerLightIntensity;
 
-            fixed3 ApplyDetailColor(fixed4 localCol, fixed4 detailCol, int func)
-            {
-                switch (func)
-                {
-                    case 1: return detailCol.rgb;
-                    case 2: return localCol.rgb * detailCol.rgb;
-                    case 3: return saturate(localCol.rgb + detailCol.rgb - (localCol.rgb * detailCol.rgb));
-                    case 4: return saturate(localCol.rgb + detailCol.rgb);
-                    case 5: return saturate(localCol.rgb - detailCol.rgb);
-                    case 6: return saturate(detailCol.rgb - localCol.rgb);
-                    case 7: return lerp(localCol.rgb, detailCol.rgb, detailCol.a);
-                    case 8: return lerp(localCol.rgb, detailCol.rgb, localCol.a);
-                    default: return localCol.rgb;
-                }
-            }
 
-            fixed ApplyDetailAlpha(fixed localAlpha, fixed detailAlpha, int func)
-            {
-                switch (func)
-                {
-                    case 1: return detailAlpha;
-                    case 2: return saturate(localAlpha * detailAlpha);
-                    case 3: return saturate(localAlpha + detailAlpha - (localAlpha * detailAlpha));
-                    default: return localAlpha;
-                }
-            }
 
             fixed3 ApplyW3DPreviewLighting(fixed3 color, float3 normalWS)
             {
@@ -148,23 +126,23 @@ Shader "W3D/Particle"
 
                 fixed4 tex = tex2D(_MainTex, baseUv);
                 fixed4 detailTex = tex2D(_DetailTex, detailUv);
-                fixed4 col = tex * _Color;
+                // stage 0: texture combined with the (lit) gradient, as the W3D shader's PriGradient says
+                fixed3 gradient = _Color.rgb;
                 if (_UseVertexColor > 0.5)
-                    col.rgb *= i.color.rgb;
-                col.a *= i.color.a;
+                    gradient *= i.color.rgb;
+                if (_ApplyLighting > 0.5)
+                    gradient = ApplyW3DPreviewLighting(gradient, facing < 0 ? -i.normalWS : i.normalWS);
+
+                fixed4 col;
+                col.rgb = W3DApplyPrimaryGradient(tex.rgb, gradient, (int)floor(_PriGradient + 0.5));
+                col.a = tex.a * _Color.a * i.color.a;
 
                 int detailColorFunc = (int)floor(_DetailColorFunc + 0.5);
                 int detailAlphaFunc = (int)floor(_DetailAlphaFunc + 0.5);
                 if (detailColorFunc != 0 || detailAlphaFunc != 0)
                 {
-                    col.rgb = ApplyDetailColor(col, detailTex, detailColorFunc);
-                    col.a = ApplyDetailAlpha(col.a, detailTex.a, detailAlphaFunc);
-                }
-
-                if (_ApplyLighting > 0.5)
-                {
-                    float3 normalWS = facing < 0 ? -i.normalWS : i.normalWS;
-                    col.rgb = ApplyW3DPreviewLighting(col.rgb, normalWS);
+                    col.rgb = W3DApplyDetailColor(col, detailTex, detailColorFunc);
+                    col.a = W3DApplyDetailAlpha(col.a, detailTex.a, detailAlphaFunc);
                 }
 
                 if (_PremultiplyAlpha > 0.5)

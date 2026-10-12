@@ -47,7 +47,10 @@ namespace W3DImporter.Parsers
             ch.Pivot = reader.ReadUInt16();
             reader.Skip(2); // padding
 
-            while (reader.Position < end)
+            // (last - first + 1) * vectorLen floats; some files carry trailing pad bytes and
+            // one (SG01-IDL.W3D) declares more frames than the chunk holds.
+            long expected = (long)System.Math.Max(0, ch.LastFrame - ch.FirstFrame + 1) * System.Math.Max(1, ch.VectorLen);
+            for (long i = 0; i < expected && reader.Position + 4 <= end; i++)
                 ch.Data.Add(reader.ReadFloat());
 
             return ch;

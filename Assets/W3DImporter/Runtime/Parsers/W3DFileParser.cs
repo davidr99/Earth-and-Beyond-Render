@@ -5,6 +5,7 @@ using W3DImporter.IO;
 using W3DImporter.Structs;
 using W3DImporter.Structs.CollisionBox;
 using W3DImporter.Structs.Animation;
+using W3DImporter.Structs.HLod;
 using W3DImporter.Structs.Mesh;
 
 namespace W3DImporter.Parsers
@@ -13,6 +14,7 @@ namespace W3DImporter.Parsers
     {
         private const bool EnableParserLogging = false;
         private static readonly Dictionary<string, W3DDataContext> ParseCache = new Dictionary<string, W3DDataContext>(System.StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, (System.DateTime, long)> ParseCacheStamps = new Dictionary<string, (System.DateTime, long)>(System.StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, AnimationScanResult> AnimationScanCache = new Dictionary<string, AnimationScanResult>(System.StringComparer.OrdinalIgnoreCase);
 
         private sealed class AnimationScanResult
@@ -27,13 +29,23 @@ namespace W3DImporter.Parsers
                 return new W3DDataContext();
 
             string normalizedPath = Path.GetFullPath(filePath);
-            if (ParseCache.TryGetValue(normalizedPath, out var cached))
+            var stamp = GetFileStamp(normalizedPath);
+            // re-parse when the file changed on disk (editor reimports)
+            if (ParseCache.TryGetValue(normalizedPath, out var cached) &&
+                ParseCacheStamps.TryGetValue(normalizedPath, out var cachedStamp) && cachedStamp == stamp)
                 return cached;
 
             var context = new W3DDataContext();
             ParseFile(normalizedPath, context);
             ParseCache[normalizedPath] = context;
+            ParseCacheStamps[normalizedPath] = stamp;
             return context;
+        }
+
+        private static (System.DateTime, long) GetFileStamp(string path)
+        {
+            var info = new FileInfo(path);
+            return info.Exists ? (info.LastWriteTimeUtc, info.Length) : (System.DateTime.MinValue, -1);
         }
 
         public static void ParseFile(string filePath, W3DDataContext context)
@@ -45,22 +57,35 @@ namespace W3DImporter.Parsers
             }
 
             LogParser($"[W3D] Loading: {filePath}");
-            context.SourcePath = Path.GetFullPath(filePath);
+            if (string.IsNullOrEmpty(context.SourcePath))
+                context.SourcePath = Path.GetFullPath(filePath);
 
-            using var stream = File.OpenRead(filePath);
+            // one sequential read: the parser seeks between chunks, which is slow on a busy disk
+            using var stream = new MemoryStream(File.ReadAllBytes(filePath), false);
             using var reader = new W3DBinaryReader(stream);
             var chunks = new W3DChunkReader(reader);
 
             long fileSize = stream.Length;
+            W3DHLod hmodelLod = null;
 
-            while (reader.Position < fileSize)
+            foreach (var chunk in chunks.EnumerateChunks(fileSize))
             {
-                var chunk = chunks.ReadChunkHeader();
-
                 switch (chunk.ChunkType)
                 {
                     case W3DChunkTypes.MESH:
-                        context.Meshes.Add(W3DMeshParser.Read(reader, chunks, chunk.ChunkEnd));
+                    {
+                        var mesh = W3DMeshParser.Read(reader, chunks, chunk.ChunkEnd);
+                        // Meshes without a MESH_HEADER3 (W3D 1.x files) cannot be loaded by the client either.
+                        if (mesh.Header != null)
+                            context.Meshes.Add(mesh);
+                        else
+                            Debug.LogWarning($"[W3D] Skipping a mesh without header (W3D 1.x format) in {Path.GetFileName(filePath)}");
+                        break;
+                    }
+
+                    case W3DChunkTypes.HMODEL:
+                        if (hmodelLod == null)
+                            hmodelLod = ReadHModel(reader, chunks, chunk.ChunkEnd);
                         break;
 
                     case W3DChunkTypes.HIERARCHY:
@@ -130,7 +155,8 @@ namespace W3DImporter.Parsers
                     // reports — without this you get the same observable result
                     // for "chunk doesn't exist in the file" and "chunk exists
                     // but the importer can't render it."
-                    case W3DChunkTypes.HMODEL:
+                    case W3DChunkTypes.SPHERE:
+                    case W3DChunkTypes.RING:
                     case W3DChunkTypes.COLLECTION:
                     case W3DChunkTypes.POINTS:
                     case W3DChunkTypes.LIGHT:
@@ -149,6 +175,59 @@ namespace W3DImporter.Parsers
 
                 reader.Seek(chunk.ChunkEnd);
             }
+
+            // HModels attach render objects to pivots exactly like a single-LOD HLOD
+            if (context.HLod == null && hmodelLod != null)
+                context.HLod = hmodelLod;
+        }
+
+        // HMODEL (0x300): header {u32 version; char name[16]; char hierarchy[16]; u16 count; u16 pad}
+        // followed by 18-byte node chunks {char renderObjName[16]; u16 pivotIndex}.
+        private static W3DHLod ReadHModel(W3DBinaryReader reader, W3DChunkReader chunks, long chunkEnd)
+        {
+            var hlod = new W3DHLod { Header = new W3DHLodHeader { LodCount = 1 } };
+            var lodArray = new W3DHLodArray { Header = new W3DHLodArrayHeader { MaxScreenSize = float.MaxValue } };
+            hlod.LodArrays.Add(lodArray);
+
+            foreach (var chunk in chunks.EnumerateChunks(chunkEnd))
+            {
+                switch (chunk.ChunkType)
+                {
+                    case W3DChunkTypes.HMODEL_HEADER:
+                        hlod.Header.Version = reader.ReadUInt32();
+                        hlod.Header.ModelName = reader.ReadFixedString();
+                        hlod.Header.HierarchyName = reader.ReadFixedString();
+                        break;
+                    case W3DChunkTypes.HMODEL_NODE:
+                    case W3DChunkTypes.HMODEL_COLLISION_NODE:
+                    case W3DChunkTypes.HMODEL_SKIN_NODE:
+                    case W3DChunkTypes.HMODEL_SHADOW_NODE:
+                    {
+                        string name = reader.ReadFixedString();
+                        int pivot = reader.ReadUInt16();
+                        lodArray.SubObjects.Add(new W3DHLodSubObject
+                        {
+                            BoneIndex = pivot,
+                            Name = name,
+                            Identifier = name
+                        });
+                        break;
+                    }
+                }
+
+                reader.Seek(chunk.ChunkEnd);
+            }
+
+            foreach (var sub in lodArray.SubObjects)
+            {
+                sub.Identifier = hlod.Header.ModelName + "." + sub.Name;
+                // pre-3.0 models index pivots without the implicit root pivot the client inserts
+                if (hlod.Header.Version < 0x30000)
+                    sub.BoneIndex += 1;
+            }
+
+            lodArray.Header.ModelCount = lodArray.SubObjects.Count;
+            return hlod;
         }
 
         private static W3DCollisionBox ReadCollisionBox(W3DBinaryReader reader)
@@ -372,7 +451,7 @@ namespace W3DImporter.Parsers
 
             try
             {
-                using var stream = File.OpenRead(normalizedPath);
+                using var stream = new MemoryStream(File.ReadAllBytes(normalizedPath), false);
                 using var reader = new W3DBinaryReader(stream);
                 var chunks = new W3DChunkReader(reader);
 

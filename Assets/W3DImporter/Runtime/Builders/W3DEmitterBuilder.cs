@@ -69,7 +69,7 @@ namespace W3DImporter.Builders
                     {
                         mat.mainTexture = tex;
                         ConfigureTextureSheetAnimation(ps, emitter, tex, lifetime);
-                        Debug.Log($"[W3D] Emitter '{emitter.Name}' texture: {info.TextureFilename} ({tex.width}x{tex.height})");
+                        if (W3DLog.Verbose) Debug.Log($"[W3D] Emitter '{emitter.Name}' texture: {info.TextureFilename} ({tex.width}x{tex.height})");
                     }
                     else
                     {
@@ -83,7 +83,7 @@ namespace W3DImporter.Builders
             {
                 foreach (var kf in emitter.Props.SizeKeyframes)
                     particleSize = Mathf.Max(particleSize, kf.Value);
-                Debug.Log($"[W3D] Emitter '{emitter.Name}' size from keyframes: {particleSize}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Emitter '{emitter.Name}' size from keyframes: {particleSize}");
             }
             if (particleSize <= 0) particleSize = 1f;
 
@@ -181,7 +181,7 @@ namespace W3DImporter.Builders
             // Force play
             ps.Play();
 
-            Debug.Log($"[W3D] Emitter '{emitter.Name}': size={particleSize}, lifetime={lifetime}, rate={emissionRate}, playing={ps.isPlaying}");
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Emitter '{emitter.Name}': size={particleSize}, lifetime={lifetime}, rate={emissionRate}, playing={ps.isPlaying}");
             return go;
         }
 

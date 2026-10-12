@@ -215,5 +215,23 @@ namespace W3DImporter.Structs.Mesh
         public bool CastsShadow => Header != null && (Header.Attrs & GeometryFlags.CAST_SHADOW) != 0;
         public bool EffectiveTwoSided => IsTwoSided || EffectPass?.TwoSided == true;
         public bool EffectiveHidden => IsHidden || EffectPass?.Hidden == true;
+
+        // Index of the material pass this object stands for (see CreatePassView).
+        public int PassIndex;
+
+        // The client draws every material pass over the previous ones (glow / lightmap /
+        // environment overlays). The builders read pass 0, so an additional pass is built from
+        // a view that shares everything with this mesh but has that pass as its only pass.
+        public W3DMesh CreatePassView(int passIndex)
+        {
+            var pass = MaterialPasses[passIndex];
+            var view = (W3DMesh)MemberwiseClone();
+            view.MaterialPasses = new List<W3DMaterialPass> { pass };
+            view.PassIndex = passIndex;
+            // mesh-level uvs would take precedence over the pass's own coordinates
+            if (pass.TxCoords.Count > 0 || pass.TxStages.Exists(s => s.TxCoords.Count > 0))
+                view.DirectUVs = new List<Vector2>();
+            return view;
+        }
     }
 }

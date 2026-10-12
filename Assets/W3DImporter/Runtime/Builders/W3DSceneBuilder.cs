@@ -16,7 +16,6 @@ namespace W3DImporter.Builders
     public class W3DSceneBuilder
     {
         private const bool EnableVerboseBuildLogging = false;
-        private static readonly Dictionary<string, string[]> SharedW3dFileListCache = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         private readonly string _baseDirectory;
         private readonly W3DTextureResolver _textureResolver;
         private readonly Dictionary<string, GameObject> _aggregateSubModelTemplateCache;
@@ -48,6 +47,9 @@ namespace W3DImporter.Builders
             if (context.Aggregate != null)
                 context.HLod = BuildHLodFromAggregate(context, aggregateBaseModel);
 
+            if (context.HLod != null && context.HLod.Header == null)
+                context.HLod.Header = new W3DHLodHeader();
+
             string rootName = context.Aggregate?.Header?.Name
                 ?? context.LodModel?.Header?.Name
                 ?? context.HLod?.Header?.ModelName
@@ -71,12 +73,22 @@ namespace W3DImporter.Builders
                 var lodArray = GetHighestDetailHLodArray(context.HLod);
                 if (lodArray != null)
                 {
+                    var meshByIdentifier = new Dictionary<string, W3DMesh>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var candidate in context.Meshes)
+                    {
+                        if (candidate != null && !meshByIdentifier.ContainsKey(candidate.Identifier))
+                            meshByIdentifier.Add(candidate.Identifier, candidate);
+                    }
+
                     foreach (var subObj in lodArray.SubObjects)
                     {
-                        if (meshLookup.TryGetValue(subObj.Name, out var mesh))
+                        // 'CONTAINER.NAME' first: entries can name a same-named mesh of another model
+                        if (meshByIdentifier.TryGetValue(subObj.Identifier ?? "", out var mesh) ||
+                            meshLookup.TryGetValue(subObj.Name, out mesh))
                         {
+                            bool skinned = mesh.IsSkin && mesh.VertInfs.Count > 0 && context.Hierarchy != null;
                             Transform meshParent = root.transform;
-                            if (!(mesh.IsSkin && mesh.VertInfs.Count == 0) &&
+                            if (!skinned && !(mesh.IsSkin && mesh.VertInfs.Count == 0) &&
                                 boneTransforms.ContainsKey(subObj.BoneIndex))
                             {
                                 meshParent = boneTransforms[subObj.BoneIndex];
@@ -87,6 +99,13 @@ namespace W3DImporter.Builders
 
                             var meshGo = W3DMeshBuilder.Build(mesh, _textureResolver);
                             meshGo.transform.SetParent(meshParent, false);
+                            if (skinned)
+                            {
+                                BindSkin(meshGo, mesh, boneTransforms, root.transform);
+                                // additional material passes are child renderers of the same skin
+                                foreach (Transform passGo in meshGo.transform)
+                                    BindSkin(passGo.gameObject, mesh, boneTransforms, root.transform);
+                            }
                         }
 
                         if (emitterLookup.TryGetValue(subObj.Name, out var emitter))
@@ -98,6 +117,8 @@ namespace W3DImporter.Builders
                         }
                     }
                 }
+
+                BuildHLodAggregateMembers(context, boneTransforms, root.transform, emitterLookup);
             }
             else if (!builtLodModel)
             {
@@ -123,6 +144,9 @@ namespace W3DImporter.Builders
             {
                 foreach (var lodArray in context.HLod.LodArrays)
                     foreach (var subObj in lodArray.SubObjects)
+                        matchedEmitters.Add(subObj.Name);
+                if (context.HLod.AggregateArray != null)
+                    foreach (var subObj in context.HLod.AggregateArray.SubObjects)
                         matchedEmitters.Add(subObj.Name);
             }
 
@@ -178,7 +202,7 @@ namespace W3DImporter.Builders
             animation.Play(clips[0].name);
 
             if (EnableVerboseBuildLogging)
-                Debug.Log($"[W3D] Attached {clips.Count} animation clip(s); playing '{clips[0].name}'");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Attached {clips.Count} animation clip(s); playing '{clips[0].name}'");
         }
 
         private void AddClip(W3DAnimation animationData, W3DHierarchy hierarchy, List<AnimationClip> clips, HashSet<string> clipNames)
@@ -240,8 +264,114 @@ namespace W3DImporter.Builders
                     continue;
 
                 if (EnableVerboseBuildLogging)
-                    Debug.Log($"[W3D Billboard] Zeroing localRotation on bone '{bone.name}' (hosts only billboard meshes)");
+                    if (W3DLog.Verbose) Debug.Log($"[W3D Billboard] Zeroing localRotation on bone '{bone.name}' (hosts only billboard meshes)");
                 bone.localRotation = Quaternion.identity;
+            }
+        }
+
+        // W3D skin vertices and normals are stored in the space of the bone each vertex is bound
+        // to (VERTEX_INFLUENCES; E&B uses only the first bone). Move them into the mesh's space
+        // at the rest pose and bind them to their bones so they follow the skeleton.
+        private static void BindSkin(GameObject meshGo, W3DMesh w3dMesh, Dictionary<int, Transform> boneTransforms, Transform root)
+        {
+            var filter = meshGo.GetComponent<MeshFilter>();
+            var meshRenderer = meshGo.GetComponent<MeshRenderer>();
+            if (filter == null || meshRenderer == null || filter.sharedMesh == null)
+                return;
+
+            var mesh = filter.sharedMesh;
+            var vertices = mesh.vertices;
+            var normals = mesh.normals;
+            bool hasNormals = normals != null && normals.Length == vertices.Length;
+
+            var bones = new List<Transform>();
+            var slotByBone = new Dictionary<int, int>();
+            var weights = new BoneWeight[vertices.Length];
+            Matrix4x4 worldToMesh = meshGo.transform.worldToLocalMatrix;
+
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                int boneIndex = i < w3dMesh.VertInfs.Count ? w3dMesh.VertInfs[i].BoneIdx : 0;
+                if (!boneTransforms.TryGetValue(boneIndex, out var bone) || bone == null)
+                {
+                    boneIndex = 0;
+                    bone = root;
+                }
+
+                if (!slotByBone.TryGetValue(boneIndex, out int slot))
+                {
+                    slot = bones.Count;
+                    slotByBone[boneIndex] = slot;
+                    bones.Add(bone);
+                }
+
+                Matrix4x4 boneToMesh = worldToMesh * bone.localToWorldMatrix;
+                vertices[i] = boneToMesh.MultiplyPoint3x4(vertices[i]);
+                if (hasNormals)
+                    normals[i] = boneToMesh.MultiplyVector(normals[i]).normalized;
+                weights[i] = new BoneWeight { boneIndex0 = slot, weight0 = 1f };
+            }
+
+            mesh.vertices = vertices;
+            if (hasNormals)
+                mesh.normals = normals;
+            mesh.boneWeights = weights;
+
+            var bindposes = new Matrix4x4[bones.Count];
+            for (int i = 0; i < bones.Count; i++)
+                bindposes[i] = bones[i].worldToLocalMatrix * meshGo.transform.localToWorldMatrix;
+            mesh.bindposes = bindposes;
+            mesh.RecalculateBounds();
+
+            var materials = meshRenderer.sharedMaterials;
+            var shadowCastingMode = meshRenderer.shadowCastingMode;
+            bool receiveShadows = meshRenderer.receiveShadows;
+            UnityEngine.Object.DestroyImmediate(meshRenderer);
+
+            // The MeshFilter stays so the importer still registers the mesh as a sub-asset.
+            var skinned = meshGo.AddComponent<SkinnedMeshRenderer>();
+            skinned.sharedMesh = mesh;
+            skinned.sharedMaterials = materials;
+            skinned.bones = bones.ToArray();
+            skinned.rootBone = root;
+            skinned.shadowCastingMode = shadowCastingMode;
+            skinned.receiveShadows = receiveShadows;
+            skinned.updateWhenOffscreen = true;
+        }
+
+        // HLOD aggregate array (0x705): render objects (mostly emitters) defined elsewhere,
+        // instantiated by name and attached to bones.
+        private void BuildHLodAggregateMembers(W3DDataContext context, Dictionary<int, Transform> boneTransforms,
+            Transform root, Dictionary<string, W3DEmitter> emitterLookup)
+        {
+            var members = context.HLod?.AggregateArray?.SubObjects;
+            if (members == null)
+                return;
+
+            foreach (var subObj in members)
+            {
+                if (string.IsNullOrWhiteSpace(subObj.Identifier) || string.Equals(subObj.Name, "NULL", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Transform boneParent = boneTransforms.TryGetValue(subObj.BoneIndex, out var bone) && bone != null ? bone : root;
+
+                if (emitterLookup.TryGetValue(subObj.Name, out var emitter))
+                {
+                    W3DEmitterBuilder.Build(emitter, boneParent, _textureResolver);
+                    continue;
+                }
+
+                if (TryLoadReferencedRenderObject(subObj.Identifier, context.SourcePath, out var referencedRoot))
+                {
+                    referencedRoot.transform.SetParent(boneParent, false);
+                    referencedRoot.transform.localPosition = Vector3.zero;
+                    referencedRoot.transform.localRotation = Quaternion.identity;
+                    referencedRoot.transform.localScale = Vector3.one;
+                }
+                else
+                {
+                    Debug.LogWarning($"[W3D] HLOD aggregate member not found: {subObj.Identifier}");
+                }
             }
         }
 
@@ -277,13 +407,14 @@ namespace W3DImporter.Builders
         {
             string skelName = null;
 
-            if (context.HLod != null && context.HLod.Header.ModelName != context.HLod.Header.HierarchyName)
-                skelName = context.HLod.Header.HierarchyName;
+            var hlodHeader = context.HLod?.Header;
+            if (hlodHeader != null && !string.Equals(hlodHeader.ModelName, hlodHeader.HierarchyName, StringComparison.OrdinalIgnoreCase))
+                skelName = hlodHeader.HierarchyName;
             else if (context.Aggregate?.Info != null)
                 skelName = context.Aggregate.Info.BaseModelName;
-            else if (context.Animation != null)
+            else if (context.Animation?.Header != null)
                 skelName = context.Animation.Header.HierarchyName;
-            else if (context.CompressedAnimation != null)
+            else if (context.CompressedAnimation?.Header != null)
                 skelName = context.CompressedAnimation.Header.HierarchyName;
 
             if (!string.IsNullOrEmpty(skelName))
@@ -291,16 +422,13 @@ namespace W3DImporter.Builders
                 string skelPath = Path.Combine(_baseDirectory, skelName.ToLower() + ".w3d");
                 if (File.Exists(skelPath))
                 {
-                    if (context.Aggregate != null)
-                    {
-                        var hierarchyContext = W3DFileParser.Parse(skelPath);
-                        if (context.Hierarchy == null)
-                            context.Hierarchy = hierarchyContext.Hierarchy;
-                    }
-                    else
-                    {
-                        W3DFileParser.ParseFile(skelPath, context);
-                    }
+                    // Parse the skeleton file on its own (cached) and merge it in; parsing it into
+                    // this cached context would duplicate its meshes on every re-import.
+                    var hierarchyContext = W3DFileParser.Parse(skelPath);
+                    if (context.Hierarchy == null)
+                        context.Hierarchy = hierarchyContext.Hierarchy;
+                    if (context.Aggregate == null)
+                        MergeAggregateBaseModel(context, hierarchyContext);
                 }
                 else
                 {
@@ -333,7 +461,8 @@ namespace W3DImporter.Builders
                     knownCompressed.Add(context.CompressedAnimations[i].Header.Name);
             }
 
-            foreach (var path in GetW3dFiles(_baseDirectory))
+            // only the files whose animations drive this hierarchy (see W3DAnimationIndex)
+            foreach (var path in W3DAnimationIndex.FilesWithAnimationsFor(_baseDirectory, hierarchyName))
             {
                 var foundAnimations = new List<W3DAnimation>();
                 var foundCompressedAnimations = new List<W3DCompressedAnimation>();
@@ -377,7 +506,7 @@ namespace W3DImporter.Builders
             }
 
             if (EnableVerboseBuildLogging)
-                Debug.Log($"[W3D] Loading aggregate base model: {modelPath}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Loading aggregate base model: {modelPath}");
             var baseContext = W3DFileParser.Parse(modelPath);
 
             MergeAggregateBaseModel(context, baseContext);
@@ -410,7 +539,10 @@ namespace W3DImporter.Builders
             }
 
             foreach (var box in baseContext.CollisionBoxes)
-                context.CollisionBoxes.Add(box);
+            {
+                if (!context.CollisionBoxes.Contains(box))
+                    context.CollisionBoxes.Add(box);
+            }
         }
 
         private void BuildAggregateSubModels(W3DDataContext context, Transform root, Dictionary<int, Transform> boneTransforms)
@@ -455,7 +587,7 @@ namespace W3DImporter.Builders
                 subRoot.transform.localRotation = Quaternion.identity;
                 subRoot.transform.localScale = Vector3.one;
                 if (EnableVerboseBuildLogging)
-                    Debug.Log($"[W3D Aggregate] Attached '{sub.SubObjectName}' to bone '{sub.BoneName}' under '{parent.name}'");
+                    if (W3DLog.Verbose) Debug.Log($"[W3D Aggregate] Attached '{sub.SubObjectName}' to bone '{sub.BoneName}' under '{parent.name}'");
             }
         }
 
@@ -631,18 +763,6 @@ namespace W3DImporter.Builders
                 : renderObjName;
         }
 
-        private static string[] GetW3dFiles(string baseDirectory)
-        {
-            if (string.IsNullOrWhiteSpace(baseDirectory) || !Directory.Exists(baseDirectory))
-                return Array.Empty<string>();
-
-            if (SharedW3dFileListCache.TryGetValue(baseDirectory, out var cached))
-                return cached;
-
-            var files = Directory.GetFiles(baseDirectory, "*.w3d");
-            SharedW3dFileListCache[baseDirectory] = files;
-            return files;
-        }
 
         private W3DHLod BuildHLodFromAggregate(W3DDataContext context, W3DDataContext baseModelContext)
         {

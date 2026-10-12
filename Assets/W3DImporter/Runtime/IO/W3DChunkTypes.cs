@@ -28,6 +28,7 @@ namespace W3DImporter.IO
         public const uint VERTICES = 0x00000002;
         public const uint VERTICES_2 = 0x00000C00;
         public const uint VERTEX_NORMALS = 0x00000003;
+        public const uint SURRENDER_NORMALS = 0x00000004; // legacy alias of VERTEX_NORMALS
         public const uint TEXCOORDS = 0x00000005;
         public const uint ENB_UV_COORDS = TEXCOORDS;
         public const uint NORMALS_2 = 0x00000C01;
@@ -133,11 +134,17 @@ namespace W3DImporter.IO
         public const uint AGGREGATE_INFO = 0x00000602;
         public const uint AGGREGATE_CLASS_INFO = 0x00000604;
 
-        // Collision box sub-chunks
-        public const uint BOX_NAME = 0x00000741;
-        public const uint BOX_COLOR = 0x00000742;
-        public const uint BOX_CENTER = 0x00000743;
-        public const uint BOX_EXTENT = 0x00000744;
+        // HModel sub-chunks
+        public const uint HMODEL_HEADER = 0x00000301;
+        public const uint HMODEL_NODE = 0x00000302;
+        public const uint HMODEL_COLLISION_NODE = 0x00000303;
+        public const uint HMODEL_SKIN_NODE = 0x00000304;
+        public const uint HMODEL_AUX_DATA = 0x00000305;
+        public const uint HMODEL_SHADOW_NODE = 0x00000306;
+
+        // Renegade-era primitive render objects (header 0x1 + keyframe channels 0x2..0x5)
+        public const uint SPHERE = 0x00000741;
+        public const uint RING = 0x00000742;
 
         // ShdMesh sub-chunks
         public const uint SHDMESH_NAME = 0x00000B01;

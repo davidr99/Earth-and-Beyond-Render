@@ -9,16 +9,37 @@ namespace W3DImporter.Builders
     {
         public static GameObject Build(W3DMesh w3dMesh, W3DTextureResolver textureResolver)
         {
-            var go = new GameObject(w3dMesh.Name);
-
             if (ShouldDebugAnimation(w3dMesh))
                 LogAnimationDiagnostics(w3dMesh);
 
+            var go = BuildPass(w3dMesh, textureResolver);
             if (w3dMesh.EffectiveHidden || IsNonRenderableMarker(w3dMesh.Name))
                 go.SetActive(false);
+            AttachUvScroller(go, w3dMesh);
+            AttachBillboard(go, w3dMesh);
+
+            // The client draws the material passes one after another over the same triangles
+            // (lightmap / glow / environment overlays). Each additional pass gets its own
+            // renderer, drawn after the previous pass (see W3DMaterialBuilder.Build).
+            if (w3dMesh.EffectPass == null && w3dMesh.Surface == null)
+            {
+                for (int p = 1; p < w3dMesh.MaterialPasses.Count; p++)
+                {
+                    var passGo = BuildPass(w3dMesh.CreatePassView(p), textureResolver);
+                    passGo.name = $"{w3dMesh.Name}.pass{p}";
+                    passGo.transform.SetParent(go.transform, false);
+                }
+            }
+
+            return go;
+        }
+
+        private static GameObject BuildPass(W3DMesh w3dMesh, W3DTextureResolver textureResolver)
+        {
+            var go = new GameObject(w3dMesh.Name);
 
             var mesh = new UnityEngine.Mesh();
-            mesh.name = w3dMesh.Name;
+            mesh.name = w3dMesh.PassIndex > 0 ? $"{w3dMesh.Name}.pass{w3dMesh.PassIndex}" : w3dMesh.Name;
 
             if (w3dMesh.Verts.Count > 65535)
                 mesh.indexFormat = IndexFormat.UInt32;
@@ -28,7 +49,8 @@ namespace W3DImporter.Builders
                 vertices[i] = W3DCoordinateConverter.ConvertPosition(w3dMesh.Verts[i]);
             mesh.vertices = vertices;
 
-            if (w3dMesh.Normals.Count == w3dMesh.Verts.Count)
+            bool hasNormals = w3dMesh.Normals.Count == w3dMesh.Verts.Count;
+            if (hasNormals)
             {
                 var normals = new Vector3[w3dMesh.Normals.Count];
                 for (int i = 0; i < w3dMesh.Normals.Count; i++)
@@ -41,9 +63,9 @@ namespace W3DImporter.Builders
             SetUVs(mesh, w3dMesh);
             SetVertexColors(mesh, w3dMesh);
 
-            if (mesh.normals == null || mesh.normals.Length == 0)
+            // no tangents: none of the W3D shaders use them
+            if (!hasNormals)
                 mesh.RecalculateNormals();
-            mesh.RecalculateTangents();
             mesh.RecalculateBounds();
 
             var filter = go.AddComponent<MeshFilter>();
@@ -55,18 +77,18 @@ namespace W3DImporter.Builders
             renderer.shadowCastingMode = w3dMesh.CastsShadow ? ShadowCastingMode.On : ShadowCastingMode.Off;
             renderer.receiveShadows = w3dMesh.CastsShadow;
             AttachResolvedTextureAnimations(go, w3dMesh, textureResolver, materials);
-            AttachUvScroller(go, w3dMesh);
-            AttachBillboard(go, w3dMesh);
 
-            Debug.Log($"[W3D] Mesh '{w3dMesh.Name}': verts={mesh.vertexCount}, tris={mesh.triangles.Length/3}, " +
-                      $"uvs={mesh.uv?.Length ?? 0}, materials={materials.Length}, " +
-                      $"textures={w3dMesh.Textures.Count}, passes={w3dMesh.MaterialPasses.Count}, " +
-                      $"camAligned={w3dMesh.IsCameraAligned}, camOriented={w3dMesh.IsCameraOriented}");
-            for (int i = 0; i < materials.Length; i++)
+            if (W3DLog.Verbose)
             {
-                var tex = materials[i]?.mainTexture;
-                Debug.Log($"  mat[{i}] shader='{materials[i]?.shader?.name}' texture='{tex?.name ?? "NULL"}' " +
-                         $"size={tex?.width ?? 0}x{tex?.height ?? 0}");
+                Debug.Log($"[W3D] Mesh '{mesh.name}': verts={mesh.vertexCount}, tris={w3dMesh.Triangles.Count}, " +
+                          $"materials={materials.Length}, textures={w3dMesh.Textures.Count}, " +
+                          $"camAligned={w3dMesh.IsCameraAligned}, camOriented={w3dMesh.IsCameraOriented}");
+                for (int i = 0; i < materials.Length; i++)
+                {
+                    var tex = materials[i]?.mainTexture;
+                    Debug.Log($"  mat[{i}] shader='{materials[i]?.shader?.name}' texture='{tex?.name ?? "NULL"}' " +
+                             $"size={tex?.width ?? 0}x{tex?.height ?? 0}");
+                }
             }
 
             return go;
@@ -74,7 +96,9 @@ namespace W3DImporter.Builders
 
         private static void ApplyTriangles(UnityEngine.Mesh mesh, W3DMesh w3dMesh)
         {
-            if (W3DTextureAnimationResolver.TryResolveFaceMaterialBindings(w3dMesh, 0, out var faceBindingIndices, out var usedBindings))
+            // Submeshes must line up with the materials W3DMaterialBuilder.Build returns.
+            if (W3DMaterialBuilder.UsesFaceMaterialSplit(w3dMesh) &&
+                W3DTextureAnimationResolver.TryResolveFaceMaterialBindings(w3dMesh, 0, out var faceBindingIndices, out var usedBindings))
             {
                 var submeshTriangles = new List<int>[usedBindings.Count];
                 for (int i = 0; i < usedBindings.Count; i++)
@@ -95,7 +119,7 @@ namespace W3DImporter.Builders
                 for (int i = 0; i < submeshTriangles.Length; i++)
                     mesh.SetTriangles(submeshTriangles[i], i, false);
 
-                Debug.Log($"[W3D] Mesh '{w3dMesh.Name}': split into {usedBindings.Count} submeshes from per-face face-material bindings");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Mesh '{w3dMesh.Name}': split into {usedBindings.Count} submeshes from per-face face-material bindings");
                 return;
             }
 
@@ -338,19 +362,19 @@ namespace W3DImporter.Builders
                     FrameRate = textureInfo.FrameRate
                 });
 
-                Debug.Log($"[W3D] Animated texture '{textureInfo.File}' on '{w3dMesh.Name}': frames={frames.Length} animType={textureInfo.AnimType} fps={textureInfo.FrameRate}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Animated texture '{textureInfo.File}' on '{w3dMesh.Name}': frames={frames.Length} animType={textureInfo.AnimType} fps={textureInfo.FrameRate}");
             }
 
             if (slots.Count == 0)
             {
-                Debug.Log($"[W3D AnimTex] '{w3dMesh.Name}': no animated texture slots attached");
+                if (W3DLog.Verbose) Debug.Log($"[W3D AnimTex] '{w3dMesh.Name}': no animated texture slots attached");
                 LogAnimationDiagnostics(w3dMesh);
                 return;
             }
 
             var animator = go.AddComponent<W3DAnimatedTexture>();
             animator.Slots = slots.ToArray();
-            Debug.Log($"[W3D AnimTex] '{w3dMesh.Name}': attached animated-texture component with {slots.Count} slot(s)");
+            if (W3DLog.Verbose) Debug.Log($"[W3D AnimTex] '{w3dMesh.Name}': attached animated-texture component with {slots.Count} slot(s)");
         }
 
         private static void AttachAtlasAnimators(GameObject go, W3DMesh w3dMesh, Material[] materials)
@@ -364,7 +388,7 @@ namespace W3DImporter.Builders
                 var config = GetGridMapperConfig(w3dMesh, matIndex);
                 if (config == null)
                 {
-                    Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} has no atlas config");
+                    if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} has no atlas config");
                     continue;
                 }
 
@@ -377,19 +401,19 @@ namespace W3DImporter.Builders
                     FrameOffset = config.FrameOffset
                 });
 
-                Debug.Log($"[W3D] Atlas mapper on '{w3dMesh.Name}' mat={matIndex}: grid={config.GridWidth} fps={config.FramesPerSecond} frames={config.FrameCount}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Atlas mapper on '{w3dMesh.Name}' mat={matIndex}: grid={config.GridWidth} fps={config.FramesPerSecond} frames={config.FrameCount}");
             }
 
             if (slots.Count == 0)
             {
-                Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': no atlas animator slots attached");
+                if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': no atlas animator slots attached");
                 LogAnimationDiagnostics(w3dMesh);
                 return;
             }
 
             var animator = go.AddComponent<W3DAtlasAnimator>();
             animator.Slots = slots.ToArray();
-            Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': attached atlas animator with {slots.Count} slot(s)");
+            if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': attached atlas animator with {slots.Count} slot(s)");
         }
 
         private static W3DTexture GetAnimatedTextureInfo(W3DMesh w3dMesh, int matIndex)
@@ -449,7 +473,7 @@ namespace W3DImporter.Builders
             var vm = GetVertexMaterialForMaterial(w3dMesh, matIndex);
             if (vm?.Info == null)
             {
-                Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} has no vertex material info");
+                if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} has no vertex material info");
                 return null;
             }
 
@@ -457,7 +481,7 @@ namespace W3DImporter.Builders
             string args = preferredStage == 1 ? vm.VmArgs1 : vm.VmArgs0;
             if (string.IsNullOrWhiteSpace(args))
             {
-                Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} vm args empty for preferredStage={preferredStage}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} vm args empty for preferredStage={preferredStage}");
                 return null;
             }
 
@@ -468,7 +492,7 @@ namespace W3DImporter.Builders
             bool isGrid = preferredStage == 1 ? mapping == 0x00000700 : mapping == 0x00070000;
             if (!isGrid)
             {
-                Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} mapping=0x{mapping:X8} is not grid");
+                if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': mat={matIndex} mapping=0x{mapping:X8} is not grid");
                 return null;
             }
 
@@ -507,7 +531,7 @@ namespace W3DImporter.Builders
                 int lastFrame = Mathf.Max(0, Mathf.RoundToInt(value.z));
                 int frameOffset = Mathf.Max(0, Mathf.RoundToInt(value.w));
                 float fps = value.x;
-                Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': shader material property '{property.Name}' vec4={value} on mat={matIndex}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D Atlas] '{w3dMesh.Name}': shader material property '{property.Name}' vec4={value} on mat={matIndex}");
 
                 return new GridMapperConfig
                 {
@@ -748,17 +772,17 @@ namespace W3DImporter.Builders
                 pass.TxStages[preferredStage].TxCoords.Count > 0)
             {
                 rawUVs = pass.TxStages[preferredStage].TxCoords[0];
-                Debug.Log($"[W3D UV] {w3dMesh.Name}: from TxStage[{preferredStage}], {rawUVs.Count} UVs, {mesh.vertexCount} verts");
+                if (W3DLog.Verbose) Debug.Log($"[W3D UV] {w3dMesh.Name}: from TxStage[{preferredStage}], {rawUVs.Count} UVs, {mesh.vertexCount} verts");
             }
             else if (pass.TxStages.Count > 0 && pass.TxStages[0].TxCoords.Count > 0)
             {
                 rawUVs = pass.TxStages[0].TxCoords[0];
-                Debug.Log($"[W3D UV] {w3dMesh.Name}: from TxStage[0], {rawUVs.Count} UVs, {mesh.vertexCount} verts");
+                if (W3DLog.Verbose) Debug.Log($"[W3D UV] {w3dMesh.Name}: from TxStage[0], {rawUVs.Count} UVs, {mesh.vertexCount} verts");
             }
             else if (pass.TxCoords.Count > 0)
             {
                 rawUVs = pass.TxCoords;
-                Debug.Log($"[W3D UV] {w3dMesh.Name}: from pass TxCoords, {rawUVs.Count} UVs, {mesh.vertexCount} verts");
+                if (W3DLog.Verbose) Debug.Log($"[W3D UV] {w3dMesh.Name}: from pass TxCoords, {rawUVs.Count} UVs, {mesh.vertexCount} verts");
             }
             else
             {
@@ -781,7 +805,7 @@ namespace W3DImporter.Builders
                 Debug.LogWarning($"[W3D UV] {w3dMesh.Name}: UV count ({rawUVs.Count}) != vertex count ({mesh.vertexCount}), padded");
 
             if (rawUVs.Count > 0)
-                Debug.Log($"[W3D UV] {w3dMesh.Name}: sample UV[0]={rawUVs[0]}, UV[1]={(rawUVs.Count > 1 ? rawUVs[1].ToString() : "N/A")}");
+                if (W3DLog.Verbose) Debug.Log($"[W3D UV] {w3dMesh.Name}: sample UV[0]={rawUVs[0]}, UV[1]={(rawUVs.Count > 1 ? rawUVs[1].ToString() : "N/A")}");
 
             if (pass.TxStages.Count > 1 && pass.TxStages[1].TxCoords.Count > 0)
             {

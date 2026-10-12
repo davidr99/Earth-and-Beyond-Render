@@ -28,6 +28,11 @@ namespace W3DImporter.Parsers
                     case W3DChunkTypes.VERTEX_NORMALS:
                         mesh.Normals = ReadVectorList(reader, chunk.ChunkEnd);
                         break;
+                    case W3DChunkTypes.SURRENDER_NORMALS:
+                        // legacy chunk the client parses exactly like VERTEX_NORMALS
+                        if (mesh.Normals.Count == 0)
+                            mesh.Normals = ReadVectorList(reader, chunk.ChunkEnd);
+                        break;
                     case W3DChunkTypes.TEXCOORDS:
                         mesh.DirectUVs = ReadVector2List(reader, chunk.ChunkEnd);
                         break;
@@ -44,7 +49,7 @@ namespace W3DImporter.Parsers
                         influenceChunkData = reader.ReadBytes((int)(chunk.ChunkEnd - reader.Position));
                         break;
                     case W3DChunkTypes.MESH_USER_TEXT:
-                        mesh.UserText = reader.ReadNullTerminatedString();
+                        mesh.UserText = reader.ReadStringToEnd(chunk.ChunkEnd);
                         mesh.UserTextData = W3DUserTextParser.Parse(mesh.UserText);
                         break;
                     case W3DChunkTypes.MATERIALS3:
@@ -127,7 +132,7 @@ namespace W3DImporter.Parsers
         private static List<Vector3> ReadVectorList(W3DBinaryReader reader, long end)
         {
             var list = new List<Vector3>();
-            while (reader.Position < end)
+            while (reader.Position + 12 <= end)
                 list.Add(reader.ReadVector3());
             return list;
         }
@@ -135,7 +140,7 @@ namespace W3DImporter.Parsers
         private static List<int> ReadIntList(W3DBinaryReader reader, long end)
         {
             var list = new List<int>();
-            while (reader.Position < end)
+            while (reader.Position + 4 <= end)
                 list.Add(reader.ReadInt32());
             return list;
         }
@@ -143,7 +148,7 @@ namespace W3DImporter.Parsers
         private static List<int> ReadUInt16List(W3DBinaryReader reader, long end)
         {
             var list = new List<int>();
-            while (reader.Position < end)
+            while (reader.Position + 2 <= end)
                 list.Add(reader.ReadUInt16());
             return list;
         }
@@ -151,7 +156,7 @@ namespace W3DImporter.Parsers
         private static List<Vector2> ReadVector2List(W3DBinaryReader reader, long end)
         {
             var list = new List<Vector2>();
-            while (reader.Position < end)
+            while (reader.Position + 8 <= end)
                 list.Add(reader.ReadVector2());
             return list;
         }
@@ -205,7 +210,7 @@ namespace W3DImporter.Parsers
         private static List<Color32> ReadEnbVertexColors(W3DBinaryReader reader, long end)
         {
             var list = new List<Color32>();
-            while (reader.Position < end)
+            while (reader.Position + 4 <= end)
             {
                 byte r = reader.ReadByte();
                 byte g = reader.ReadByte();
@@ -290,9 +295,8 @@ namespace W3DImporter.Parsers
 
         private static void ReadMaterials3(W3DBinaryReader reader, W3DChunkReader chunks, long end, W3DMesh mesh)
         {
-            while (reader.Position < end)
+            foreach (var chunk in chunks.EnumerateChunks(end))
             {
-                var chunk = chunks.ReadChunkHeader();
                 if (chunk.ChunkType == W3DChunkTypes.MATERIAL3)
                     ReadMaterial3(reader, chunks, chunk.ChunkEnd, mesh);
                 else
@@ -315,7 +319,7 @@ namespace W3DImporter.Parsers
                 switch (chunk.ChunkType)
                 {
                     case W3DChunkTypes.MATERIAL3_NAME:
-                        name = reader.ReadNullTerminatedString();
+                        name = reader.ReadStringToEnd(chunk.ChunkEnd);
                         break;
                     case W3DChunkTypes.MATERIAL3_INFO:
                         info = ReadMaterial3Info(reader, out rawDiffuse);
@@ -364,7 +368,7 @@ namespace W3DImporter.Parsers
             }
 
             mesh.LegacyMaterialTextureIds.Add(textureIndex);
-            mesh.Shaders.Add(CreateMaterial3Shader(info, useSelfIllum));
+            mesh.Shaders.Add(CreateMaterial3Shader(info, useSelfIllum, textureIndex >= 0));
         }
 
         private static W3DVertexMaterialInfo ReadMaterial3Info(W3DBinaryReader reader, out Color rawDiffuse)
@@ -399,7 +403,7 @@ namespace W3DImporter.Parsers
                 switch (chunk.ChunkType)
                 {
                     case W3DChunkTypes.MAP3_FILENAME:
-                        textureName = reader.ReadNullTerminatedString();
+                        textureName = reader.ReadStringToEnd(chunk.ChunkEnd);
                         break;
                     case W3DChunkTypes.MAP3_INFO:
                         chunks.SkipChunk(chunk);
@@ -415,23 +419,28 @@ namespace W3DImporter.Parsers
             return textureName;
         }
 
-        private static W3DShader CreateMaterial3Shader(W3DVertexMaterialInfo info, bool additive)
+        private static W3DShader CreateMaterial3Shader(W3DVertexMaterialInfo info, bool additive, bool textured)
         {
+            // WW3D ShaderClass defaults (depth test less-equal, depth write, modulate gradient,
+            // opaque ONE/ZERO blend); texturing is only enabled when a map is present.
             var shader = new W3DShader
             {
-                DepthCompare = 1,
+                DepthCompare = 3,
                 DepthMask = 1,
                 ColorMask = 1,
+                PriGradient = 1,
                 SrcBlend = 1,
                 DestBlend = 0,
-                Texturing = 1
+                Texturing = (byte)(textured ? 1 : 0)
             };
 
             if (additive)
             {
-                shader.DepthMask = 0;
+                // SI map: ONE/ONE with the primary gradient disabled; the client leaves
+                // the depth mask unchanged (FUN_009bb260).
                 shader.SrcBlend = 1;
                 shader.DestBlend = 1;
+                shader.PriGradient = 0;
             }
             // Only MATERIAL3 attribute bit 0 enables alpha blending in the client
             // (W3D_FORMAT.md §5); Opacity/Translucency do not switch the blend mode.
@@ -454,16 +463,26 @@ namespace W3DImporter.Parsers
             var stage = new W3DTextureStage();
             var textureIds = new List<int>();
 
-            bool hasPerFaceMaterials = mesh.PerTriangleShaderIndices.Count == mesh.Triangles.Count && mesh.Triangles.Count > 0;
+            // The client skips the per-triangle ids when the mesh has a single material.
+            bool hasPerFaceMaterials = mesh.PerTriangleShaderIndices.Count == mesh.Triangles.Count && mesh.Triangles.Count > 0
+                                       && mesh.VertMaterials.Count > 1;
             if (hasPerFaceMaterials)
             {
+                // Like the client (FUN_009bb710): shader and texture per triangle, vertex
+                // material per vertex (each corner takes the material of its triangle).
+                var vertexMaterialIds = new int[mesh.Verts.Count];
                 for (int i = 0; i < mesh.PerTriangleShaderIndices.Count; i++)
                 {
                     int materialId = Mathf.Clamp(mesh.PerTriangleShaderIndices[i], 0, mesh.VertMaterials.Count - 1);
-                    pass.VertexMaterialIds.Add(materialId);
+                    foreach (uint vertId in mesh.Triangles[i].VertIds)
+                    {
+                        if (vertId < vertexMaterialIds.Length)
+                            vertexMaterialIds[vertId] = materialId;
+                    }
                     pass.ShaderIds.Add(materialId < mesh.Shaders.Count ? materialId : -1);
                     textureIds.Add(GetLegacyMaterialTextureId(mesh, materialId));
                 }
+                pass.VertexMaterialIds.AddRange(vertexMaterialIds);
             }
             else
             {
@@ -532,7 +551,7 @@ namespace W3DImporter.Parsers
                         switch (sub.ChunkType)
                         {
                             case W3DChunkTypes.VERTEX_MATERIAL_NAME:
-                                vm.Name = reader.ReadNullTerminatedString();
+                                vm.Name = reader.ReadStringToEnd(sub.ChunkEnd);
                                 break;
                             case W3DChunkTypes.VERTEX_MATERIAL_INFO:
                                 vm.Info = ReadVertexMaterialInfo(reader);
@@ -596,7 +615,7 @@ namespace W3DImporter.Parsers
                         switch (sub.ChunkType)
                         {
                             case W3DChunkTypes.TEXTURE_NAME:
-                                tex.File = reader.ReadNullTerminatedString();
+                                tex.File = reader.ReadStringToEnd(sub.ChunkEnd);
                                 tex.Id = tex.File;
                                 break;
                             case W3DChunkTypes.TEXTURE_INFO:
@@ -630,15 +649,15 @@ namespace W3DImporter.Parsers
                 switch (chunk.ChunkType)
                 {
                     case W3DChunkTypes.VERTEX_MATERIAL_IDS:
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 4 <= chunk.ChunkEnd)
                             pass.VertexMaterialIds.Add(reader.ReadInt32());
                         break;
                     case W3DChunkTypes.SHADER_IDS:
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 4 <= chunk.ChunkEnd)
                             pass.ShaderIds.Add(reader.ReadInt32());
                         break;
                     case W3DChunkTypes.SHADER_MATERIAL_ID:
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 4 <= chunk.ChunkEnd)
                             pass.ShaderMaterialIds.Add(reader.ReadInt32());
                         break;
                     case W3DChunkTypes.DCG:
@@ -647,7 +666,7 @@ namespace W3DImporter.Parsers
                         if (prelitVertex && pass.Dcg.Count > 0)
                         {
                             int dcgIndex = 0;
-                            while (reader.Position < chunk.ChunkEnd)
+                            while (reader.Position + 4 <= chunk.ChunkEnd)
                             {
                                 var replacement = reader.ReadRGBA();
                                 if (dcgIndex < pass.Dcg.Count)
@@ -661,7 +680,7 @@ namespace W3DImporter.Parsers
                         }
                         else
                         {
-                            while (reader.Position < chunk.ChunkEnd)
+                            while (reader.Position + 4 <= chunk.ChunkEnd)
                                 pass.Dcg.Add(reader.ReadRGBA());
                         }
                         break;
@@ -671,7 +690,7 @@ namespace W3DImporter.Parsers
                         if (pass.Dig.Count > 0)
                         {
                             int digIndex = 0;
-                            while (reader.Position < chunk.ChunkEnd)
+                            while (reader.Position + 4 <= chunk.ChunkEnd)
                             {
                                 var factor = reader.ReadRGBA();
                                 if (digIndex < pass.Dig.Count)
@@ -687,7 +706,7 @@ namespace W3DImporter.Parsers
                         }
                         else
                         {
-                            while (reader.Position < chunk.ChunkEnd)
+                            while (reader.Position + 4 <= chunk.ChunkEnd)
                             {
                                 var dig = reader.ReadRGBA();
                                 dig.a = 255;
@@ -696,7 +715,7 @@ namespace W3DImporter.Parsers
                         }
                         break;
                     case W3DChunkTypes.SCG:
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 4 <= chunk.ChunkEnd)
                             pass.Scg.Add(reader.ReadRGBA());
                         break;
                     case W3DChunkTypes.TEXTURE_STAGE:
@@ -704,7 +723,7 @@ namespace W3DImporter.Parsers
                         break;
                     case W3DChunkTypes.STAGE_TEXCOORDS:
                         var coords = new List<Vector2>();
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 8 <= chunk.ChunkEnd)
                             coords.Add(reader.ReadVector2());
                         pass.TxCoords = coords;
                         break;
@@ -726,13 +745,14 @@ namespace W3DImporter.Parsers
                 {
                     case W3DChunkTypes.TEXTURE_IDS:
                         var ids = new List<int>();
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 4 <= chunk.ChunkEnd)
                             ids.Add(reader.ReadInt32());
                         stage.TxIds.Add(ids);
                         break;
                     case W3DChunkTypes.STAGE_TEXCOORDS:
+                    case W3DChunkTypes.TEXCOORDS: // the client accepts the legacy chunk id here too
                         var coords = new List<Vector2>();
-                        while (reader.Position < chunk.ChunkEnd)
+                        while (reader.Position + 8 <= chunk.ChunkEnd)
                             coords.Add(reader.ReadVector2());
                         stage.TxCoords.Add(coords);
                         break;

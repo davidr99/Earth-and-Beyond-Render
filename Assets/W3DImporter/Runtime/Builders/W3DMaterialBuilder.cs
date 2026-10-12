@@ -154,9 +154,46 @@ namespace W3DImporter.Builders
                 return BuildFromEnbUserText(w3dMesh, textureResolver);
 
             if (w3dMesh.VertMaterials.Count > 0)
-                return BuildFromVertexMaterials(w3dMesh, textureResolver);
+            {
+                var materials = BuildFromVertexMaterials(w3dMesh, textureResolver);
+                if (w3dMesh.PassIndex > 0)
+                {
+                    for (int i = 0; i < materials.Length; i++)
+                        DrawAfterPreviousPasses(materials[i], w3dMesh.PassIndex);
+                }
+                return materials;
+            }
 
             return new[] { CreateDefaultMaterial() };
+        }
+
+        // An additional material pass covers the same triangles as the passes before it and
+        // must be drawn after them (the client draws the passes in order, depth test LEQUAL).
+        // HDRP renders queues 2000-2500 (opaque) and 2900-3100 (transparent).
+        private static void DrawAfterPreviousPasses(Material mat, int passIndex)
+        {
+            if (mat == null)
+                return;
+
+            // The CG additive / particle shaders transform vertices differently from W3D/Opaque,
+            // so an overlay drawn with them z-fights with the pass below. W3D/Transparent uses
+            // the same transform as W3D/Opaque and takes any blend pair.
+            if (TransparentShader != null && (mat.shader == AdditiveShader || mat.shader == ParticleShader))
+                MoveToShader(mat, TransparentShader);
+
+            int queue = mat.renderQueue >= 0 ? mat.renderQueue : mat.shader.renderQueue;
+            int last = queue <= 2500 ? 2500 : 3100;
+            mat.renderQueue = Mathf.Min(queue + passIndex, last);
+        }
+
+        // True when Build returns one material per face binding, i.e. the mesh has to be
+        // split into matching submeshes.
+        public static bool UsesFaceMaterialSplit(W3DMesh w3dMesh)
+        {
+            return w3dMesh.EffectPass == null &&
+                   w3dMesh.Surface == null &&
+                   w3dMesh.VertMaterials.Count > 0 &&
+                   W3DTextureAnimationResolver.TryResolveFaceMaterialBindings(w3dMesh, 0, out _, out _);
         }
 
         private static Material[] BuildFromVertexMaterials(W3DMesh w3dMesh, W3DTextureResolver textureResolver)
@@ -171,17 +208,13 @@ namespace W3DImporter.Builders
                     splitMaterials[i].name = $"{w3dMesh.Name}.faceMat{i}";
                 }
 
-                Debug.Log($"[W3D] Built {splitMaterials.Length} split materials for '{w3dMesh.Name}' from per-face face-material bindings");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Built {splitMaterials.Length} split materials for '{w3dMesh.Name}' from per-face face-material bindings");
                 return splitMaterials;
             }
 
-            var materials = new Material[Mathf.Max(1, w3dMesh.VertMaterials.Count)];
-            bool useVertexColor = MeshHasTintedDcg(w3dMesh);
-
-            for (int i = 0; i < w3dMesh.VertMaterials.Count; i++)
-                materials[i] = BuildVertexMaterial(w3dMesh, i, textureResolver, useVertexColor);
-
-            return materials;
+            // Every triangle uses the same vertex material / shader / textures: one material
+            // for the mesh's single submesh.
+            return new[] { BuildVertexMaterial(w3dMesh, 0, textureResolver, MeshHasTintedDcg(w3dMesh)) };
         }
 
         private static Material BuildVertexMaterial(
@@ -191,18 +224,20 @@ namespace W3DImporter.Builders
             bool useVertexColor,
             W3DFaceMaterialBinding faceBindingOverride = null)
         {
-            int requestedVertexMaterialIndex = faceBindingOverride?.VertexMaterialIndex ?? materialIndex;
-            int vertexMaterialIndex = Mathf.Clamp(requestedVertexMaterialIndex, 0, Mathf.Max(0, w3dMesh.VertMaterials.Count - 1));
-            var vm = w3dMesh.VertMaterials[vertexMaterialIndex];
+            // materialIndex is the face-binding index of a split mesh (0 otherwise); all
+            // lookups below resolve the pass ids through that binding.
+            var vm = faceBindingOverride != null &&
+                     faceBindingOverride.VertexMaterialIndex >= 0 &&
+                     faceBindingOverride.VertexMaterialIndex < w3dMesh.VertMaterials.Count
+                ? w3dMesh.VertMaterials[faceBindingOverride.VertexMaterialIndex]
+                : W3DTextureAnimationResolver.ResolveVertexMaterial(w3dMesh, materialIndex) ?? w3dMesh.VertMaterials[0];
 
             var mat = new Material(LitShader);
             mat.name = w3dMesh.Name + "." + vm.Name;
             SetOpaque(mat);
 
-            int materialLookupIndex = requestedVertexMaterialIndex >= 0 ? requestedVertexMaterialIndex : materialIndex;
-            int primaryTextureIndex = faceBindingOverride != null && faceBindingOverride.PrimaryTextureIndex >= 0
-                ? faceBindingOverride.PrimaryTextureIndex
-                : GetPrimaryTextureIndex(w3dMesh, materialLookupIndex);
+            int materialLookupIndex = materialIndex;
+            int primaryTextureIndex = GetPrimaryTextureIndex(w3dMesh, materialLookupIndex);
             ApplyTexture(mat, w3dMesh, materialLookupIndex, textureResolver, primaryTextureIndex);
 
             if (vm.Info != null)
@@ -255,14 +290,41 @@ namespace W3DImporter.Builders
                     SetTransparent(mat);
             }
 
-            ApplyEmissiveDrivenSurface(mat, vm.Info);
+            bool vertexColorIrrelevant = ApplyEmissiveDrivenSurface(mat, vm.Info);
             ApplyMeshFlags(mat, w3dMesh);
             int? secondaryTextureIndex = faceBindingOverride != null
                 ? (faceBindingOverride.SecondaryTextureIndex >= 0 ? (int?)faceBindingOverride.SecondaryTextureIndex : null)
                 : null;
             ApplySecondaryTextureStage(mat, w3dMesh, materialLookupIndex, textureResolver, resolvedShader, secondaryTextureIndex);
-            SetUseVertexColor(mat, useVertexColor);
+            SetPrimaryGradient(mat, resolvedShader);
+            ApplyTexGen(mat, vm);
+            // vertex colors (DCG) feed the lighting, see ApplyEmissiveDrivenSurface
+            SetUseVertexColor(mat, useVertexColor && !vertexColorIrrelevant);
             return mat;
+        }
+
+        // Environment mappers: the shader generates the stage's texture coordinates from the
+        // normal / reflection vector (W3DTextureAnimationResolver.GetStageTexGen). Only the HLSL
+        // W3D shaders do that, so CG-shader materials move to W3D/Transparent (any blend pair).
+        private static void ApplyTexGen(Material mat, W3DVertexMaterial vm)
+        {
+            int baseKind = W3DTextureAnimationResolver.GetStageTexGen(vm, 0, out int baseAxis, out Vector4 baseGrid);
+            int detailKind = W3DTextureAnimationResolver.GetStageTexGen(vm, 1, out int detailAxis, out Vector4 detailGrid);
+            if (baseKind == 0 && detailKind == 0)
+                return;
+
+            if (TransparentShader != null && (mat.shader == AdditiveShader || mat.shader == ParticleShader))
+                MoveToShader(mat, TransparentShader);
+
+            if (mat.HasProperty("_BaseTexGen"))
+            {
+                mat.SetFloat("_BaseTexGen", baseKind);
+                mat.SetFloat("_BaseTexGenAxis", baseAxis);
+                mat.SetVector("_BaseTexGenGrid", baseGrid);
+                mat.SetFloat("_DetailTexGen", detailKind);
+                mat.SetFloat("_DetailTexGenAxis", detailAxis);
+                mat.SetVector("_DetailTexGenGrid", detailGrid);
+            }
         }
 
         private static Material[] BuildFromEnbUserText(W3DMesh w3dMesh, W3DTextureResolver textureResolver)
@@ -312,7 +374,7 @@ namespace W3DImporter.Builders
 
             mat.mainTexture = tex;
             SetMaterialTexture(mat, tex);
-            Debug.Log($"[W3D] Applied texture '{w3dMesh.Textures[texIdx].File}' to material '{mat.name}'");
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Applied texture '{w3dMesh.Textures[texIdx].File}' to material '{mat.name}'");
         }
 
         private static W3DShader ResolveShaderForMaterial(W3DMesh w3dMesh, int materialIndex, W3DFaceMaterialBinding faceBindingOverride)
@@ -378,7 +440,7 @@ namespace W3DImporter.Builders
 
             SetSecondaryMaterialTexture(mat, tex);
             SetPostDetailCombine(mat, shader.DetailColorFunc, shader.DetailAlphaFunc, UseSecondaryStageUvSet(w3dMesh, matIndex));
-            Debug.Log($"[W3D] Applied secondary texture '{textureName}' to material '{mat.name}' with detailColor={shader.DetailColorFunc} detailAlpha={shader.DetailAlphaFunc}");
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Applied secondary texture '{textureName}' to material '{mat.name}' with detailColor={shader.DetailColorFunc} detailAlpha={shader.DetailAlphaFunc}");
         }
 
         private static void ApplyVertexMaterialInfo(Material mat, W3DVertexMaterialInfo info)
@@ -397,22 +459,60 @@ namespace W3DImporter.Builders
 
         // DX8 fixed-function gradient = Emissive + Ambient·sceneAmbient + Diffuse·light,
         // saturated to 1. When Diffuse and Ambient are both black the surface is
-        // lighting-INDEPENDENT: the client renders exactly texture × Emissive (screens,
-        // glow strips, beams). Mirror that: unlit, tinted by the emissive color.
-        private static void ApplyEmissiveDrivenSurface(Material mat, W3DVertexMaterialInfo info)
+        // lighting-INDEPENDENT: the client renders texture × Emissive (screens, glow strips,
+        // beams). With vertex colors the client goes further (mesh post-load FUN_009475E0):
+        // it bakes DCG × Emissive into the vertex colors, makes them the diffuse source and
+        // turns lighting OFF, so the surface is texture × DCG × Emissive (baked interior
+        // lighting such as jsd01a's). A white Emissive next to a non-black Diffuse / Ambient
+        // saturates the lit sum instead: full texture brightness, vertex colors irrelevant.
+        // Mirror both: unlit, tinted by the emissive color.
+        // Returns true when vertex colors make no difference to the result.
+        private static bool ApplyEmissiveDrivenSurface(Material mat, W3DVertexMaterialInfo info)
         {
             if (mat == null || info == null)
-                return;
+                return false;
 
-            if (!IsBlackRgb(info.Diffuse) || !IsBlackRgb(info.Ambient) || !HasVisibleRgb(info.Emissive))
-                return;
+            bool saturated = info.Emissive.r >= 0.99f && info.Emissive.g >= 0.99f && info.Emissive.b >= 0.99f;
+            bool emissiveOnly = IsBlackRgb(info.Diffuse) && IsBlackRgb(info.Ambient) && HasVisibleRgb(info.Emissive);
+            if (!saturated && !emissiveOnly)
+                return false;
 
             SetLightingEnabled(mat, false);
 
             var currentColor = GetMaterialColor(mat);
-            var tint = info.Emissive;
+            var tint = emissiveOnly ? info.Emissive : Color.white;
             tint.a = currentColor.a;
             SetMaterialColor(mat, tint);
+            return !emissiveOnly;
+        }
+
+        // Switches the shader, keeping textures, colors, render queue and cull mode (the float
+        // properties shared by the W3D shaders keep their values).
+        private static void MoveToShader(Material mat, Shader shader)
+        {
+            var mainTexture = mat.mainTexture;
+            var detailTexture = GetSecondaryMaterialTexture(mat);
+            var detailScale = GetSecondaryMaterialTextureScale(mat);
+            var color = GetMaterialColor(mat);
+            var emissive = GetMaterialEmissive(mat);
+            int queue = mat.renderQueue;
+            float cull = mat.HasProperty("_Cull") ? mat.GetFloat("_Cull")
+                : mat.HasProperty("_CullMode") ? mat.GetFloat("_CullMode") : (float)CullMode.Back;
+
+            mat.shader = shader;
+            RestoreMaterialState(mat, mainTexture, detailTexture, detailScale, color, emissive);
+            if (mat.HasProperty("_Cull"))
+                mat.SetFloat("_Cull", cull);
+            if (mat.HasProperty("_CullMode"))
+                mat.SetFloat("_CullMode", cull);
+            mat.renderQueue = queue;
+        }
+
+        // How stage 0 combines the texture with the gradient (W3D shader PriGradient).
+        private static void SetPrimaryGradient(Material mat, W3DShader shader)
+        {
+            if (mat.HasProperty("_PriGradient"))
+                mat.SetFloat("_PriGradient", shader != null ? shader.PriGradient : 1f);
         }
 
         private static bool HasVisibleRgb(Color color)
@@ -500,7 +600,7 @@ namespace W3DImporter.Builders
             byte src = shader.SrcBlend;
             byte dst = shader.DestBlend;
 
-            Debug.Log($"[W3D Blend] '{mat.name}' src={src} dst={dst} alphaTest={shader.AlphaTest} depthMask={shader.DepthMask}");
+            if (W3DLog.Verbose) Debug.Log($"[W3D Blend] '{mat.name}' src={src} dst={dst} alphaTest={shader.AlphaTest} depthMask={shader.DepthMask}");
 
             // Additive: preserve whether the W3D pass is ONE/ONE or SRC_ALPHA/ONE.
             if (dst == DST_ONE && (src == SRC_ONE || src == SRC_SRC_ALPHA))
@@ -546,6 +646,15 @@ namespace W3DImporter.Builders
             if (dst == DST_ONE_MINUS_SRC_COLOR)
             {
                 SetParticleBlend(mat, MapSourceBlendMode(src), BlendMode.OneMinusSrcColor);
+                ApplyDepthState(mat, shader);
+                return true;
+            }
+
+            // Any other blend pair is reproduced as is (overlay passes use e.g.
+            // ONE_MINUS_SRC_ALPHA / SRC_ALPHA to let the pass below show through).
+            if (src != SRC_ONE || dst != DST_ZERO)
+            {
+                SetParticleBlend(mat, MapSourceBlendMode(src), MapDestBlendMode(dst));
                 ApplyDepthState(mat, shader);
                 return true;
             }
@@ -625,6 +734,27 @@ namespace W3DImporter.Builders
                     return BlendMode.OneMinusSrcAlpha;
                 default:
                     return BlendMode.One;
+            }
+        }
+
+        private static BlendMode MapDestBlendMode(byte dst)
+        {
+            switch (dst)
+            {
+                case DST_ZERO:
+                    return BlendMode.Zero;
+                case DST_ONE:
+                    return BlendMode.One;
+                case DST_SRC_COLOR:
+                    return BlendMode.SrcColor;
+                case DST_ONE_MINUS_SRC_COLOR:
+                    return BlendMode.OneMinusSrcColor;
+                case DST_SRC_ALPHA:
+                    return BlendMode.SrcAlpha;
+                case DST_ONE_MINUS_SRC_ALPHA:
+                    return BlendMode.OneMinusSrcAlpha;
+                default:
+                    return BlendMode.Zero;
             }
         }
 
@@ -762,6 +892,12 @@ namespace W3DImporter.Builders
             var binding = W3DTextureAnimationResolver.ResolvePrimaryTextureBinding(w3dMesh, matIndex);
             if (binding != null && binding.TextureIndex >= 0 && binding.TextureIndex < w3dMesh.Textures.Count)
                 return binding.TextureIndex;
+
+            // When the base pass has texture stages, no binding means the faces are untextured
+            // (texture id -1); only meshes without stage data fall back to the texture list.
+            var pass = W3DTextureAnimationResolver.ResolveMaterialPass(w3dMesh, matIndex, out _);
+            if (pass != null && pass.TxStages.Count > 0)
+                return -1;
 
             int texIdx = -1;
 

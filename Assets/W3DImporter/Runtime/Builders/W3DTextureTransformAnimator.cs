@@ -249,11 +249,13 @@ namespace W3DImporter.Builders
 
             // Match WW3D GridTextureMapperClass: preserve the authored UV scale and only
             // apply a per-frame atlas offset. The original runtime does not inject an
-            // additional 1/grid scale in the texture matrix.
+            // additional 1/grid scale in the texture matrix. The client's matrix adds
+            // (column, row) / grid with rows counted from the texture's first row, which is
+            // the direction of Unity's v here (raw DDS rows, flipped mesh v).
             scale = baseScale;
             offset = new Vector2(
                 baseOffset.x + (baseScale.x < 0f ? -column * inv : column * inv),
-                baseOffset.y + (baseScale.y < 0f ? row * inv : -row * inv));
+                baseOffset.y + (baseScale.y < 0f ? -row * inv : row * inv));
 
             return true;
         }

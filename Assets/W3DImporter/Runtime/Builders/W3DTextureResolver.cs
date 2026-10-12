@@ -21,6 +21,22 @@ namespace W3DImporter.Builders
         private readonly Dictionary<string, Texture2D[]> _animationCache = new Dictionary<string, Texture2D[]>();
         private readonly HashSet<string> _missingTextures = new HashSet<string>();
 
+        // Case-insensitive file name -> path of each texture directory, rebuilt when the
+        // directory changes. The art folder holds ~15,000 files and every texture is tried with
+        // several extensions; listing it on each miss made model loads slow.
+        private sealed class DirectoryIndex
+        {
+            public System.DateTime Stamp;
+            public Dictionary<string, string> Files;
+        }
+
+        private static readonly Dictionary<string, DirectoryIndex> DirectoryIndexes =
+            new Dictionary<string, DirectoryIndex>(System.StringComparer.OrdinalIgnoreCase);
+
+        // png path -> (size, write time) of upscaled pngs whose colors were checked and need no repair
+        private static readonly Dictionary<string, (long, System.DateTime)> CheckedUpscaledPngs =
+            new Dictionary<string, (long, System.DateTime)>(System.StringComparer.OrdinalIgnoreCase);
+
         public W3DTextureResolver(string baseDirectory)
         {
             _baseDirectory = baseDirectory;
@@ -123,7 +139,12 @@ namespace W3DImporter.Builders
                         // LoadImage fills rows bottom-up (image displays upright), but the
                         // raw DDS loader uploads rows top-down and the mesh V-flip is
                         // calibrated to THAT orientation — flip so both paths match.
-                        FlipVertically(tex);
+                        var pixels = tex.GetPixels32();
+                        FlipRows(pixels, tex.width, tex.height);
+                        if (ext == ".png")
+                            RepairUpscaledColors(pixels, tex.width, tex.height, path);
+                        tex.SetPixels32(pixels);
+                        tex.Apply(true);
                         tex.name = Path.GetFileNameWithoutExtension(path);
                         tex.wrapMode = TextureWrapMode.Repeat;
                         // The DDS path has no mip chain and always samples sharp mip 0;
@@ -131,7 +152,7 @@ namespace W3DImporter.Builders
                         // detail is filtered away at any distance or viewing angle.
                         tex.filterMode = FilterMode.Trilinear;
                         tex.anisoLevel = 16;
-                        Debug.Log($"[W3D] Loaded: {path}");
+                        if (W3DLog.Verbose) Debug.Log($"[W3D] Loaded: {path}");
                         return tex;
                     }
                 }
@@ -152,10 +173,8 @@ namespace W3DImporter.Builders
             return null;
         }
 
-        private static void FlipVertically(Texture2D tex)
+        private static void FlipRows(Color32[] pixels, int w, int h)
         {
-            var pixels = tex.GetPixels32();
-            int w = tex.width, h = tex.height;
             for (int y = 0; y < h / 2; y++)
             {
                 int top = y * w;
@@ -165,8 +184,148 @@ namespace W3DImporter.Builders
                     (pixels[top + x], pixels[bottom + x]) = (pixels[bottom + x], pixels[top + x]);
                 }
             }
-            tex.SetPixels32(pixels);
-            tex.Apply(true);
+        }
+
+        // The AI-upscaled pngs lost (or darkened) their color wherever the original texture is
+        // transparent: ~30 of them are black there, ~90 more noticeably darker (e.g. g_lng1,
+        // the wall texture of nbar01). W3D shaders that ignore alpha show that color, so where
+        // the png is transparent its color is blended back toward the original .dds / .tga.
+        // pixels: rows in DDS order (first row = top), as the loaders hand them to Unity.
+        private static void RepairUpscaledColors(Color32[] pixels, int width, int height, string pngPath)
+        {
+            var info = new FileInfo(pngPath);
+            var stamp = (info.Length, info.LastWriteTimeUtc);
+            if (CheckedUpscaledPngs.TryGetValue(pngPath, out var checkedStamp) && checkedStamp == stamp)
+                return;
+
+            int lowAlpha = 0;
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                if (pixels[i].a < 128)
+                    lowAlpha++;
+            }
+
+            int ow = 0, oh = 0;
+            var original = lowAlpha >= pixels.Length / 100
+                ? LoadOriginalPixels(Path.GetDirectoryName(pngPath), Path.GetFileNameWithoutExtension(pngPath), out ow, out oh)
+                : null;
+            if (original == null || !IsDarkenedUnderAlpha(pixels, width, height, original, ow, oh))
+            {
+                CheckedUpscaledPngs[pngPath] = stamp;
+                return;
+            }
+
+            for (int y = 0; y < height; y++)
+            {
+                float fy = Mathf.Clamp((y + 0.5f) * oh / height - 0.5f, 0f, oh - 1);
+                int y0 = (int)fy, y1 = Mathf.Min(y0 + 1, oh - 1);
+                float ty = fy - y0;
+                for (int x = 0; x < width; x++)
+                {
+                    int i = y * width + x;
+                    var p = pixels[i];
+                    if (p.a == 255)
+                        continue;
+
+                    float fx = Mathf.Clamp((x + 0.5f) * ow / width - 0.5f, 0f, ow - 1);
+                    int x0 = (int)fx, x1 = Mathf.Min(x0 + 1, ow - 1);
+                    float tx = fx - x0;
+                    var c00 = original[y0 * ow + x0];
+                    var c10 = original[y0 * ow + x1];
+                    var c01 = original[y1 * ow + x0];
+                    var c11 = original[y1 * ow + x1];
+                    // trust the png's color in proportion to its opacity
+                    float t = p.a / 255f;
+                    p.r = Blend(Bilinear(c00.r, c10.r, c01.r, c11.r, tx, ty), p.r, t);
+                    p.g = Blend(Bilinear(c00.g, c10.g, c01.g, c11.g, tx, ty), p.g, t);
+                    p.b = Blend(Bilinear(c00.b, c10.b, c01.b, c11.b, tx, ty), p.b, t);
+                    pixels[i] = p;
+                }
+            }
+
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Restored the color of transparent pixels in {Path.GetFileName(pngPath)} from the original texture");
+        }
+
+        // True when the png's color under the original's transparent pixels is clearly darker
+        // than the original's.
+        private static bool IsDarkenedUnderAlpha(Color32[] png, int width, int height, Color32[] original, int ow, int oh)
+        {
+            long pngSum = 0, originalSum = 0, count = 0;
+            for (int y = 0; y < oh; y++)
+            {
+                int py = y * height / oh;
+                for (int x = 0; x < ow; x++)
+                {
+                    var o = original[y * ow + x];
+                    if (o.a >= 128)
+                        continue;
+                    var p = png[py * width + x * width / ow];
+                    originalSum += o.r + o.g + o.b;
+                    pngSum += p.r + p.g + p.b;
+                    count++;
+                }
+            }
+
+            return count > 0 && originalSum > count * 3 * 8 && pngSum < originalSum * 0.75;
+        }
+
+        private static float Bilinear(byte c00, byte c10, byte c01, byte c11, float tx, float ty)
+        {
+            float top = c00 + (c10 - c00) * tx;
+            float bottom = c01 + (c11 - c01) * tx;
+            return top + (bottom - top) * ty;
+        }
+
+        private static byte Blend(float original, byte png, float t)
+        {
+            return (byte)Mathf.Clamp(Mathf.Round(original + (png - original) * t), 0f, 255f);
+        }
+
+        // Pixels of the original game texture (.dds or .tga) in DDS row order.
+        private static Color32[] LoadOriginalPixels(string directory, string baseName, out int width, out int height)
+        {
+            width = height = 0;
+            string dds = FindCaseInsensitive(directory, baseName + ".dds");
+            if (dds != null)
+                return DecodeDds(File.ReadAllBytes(dds), out width, out height);
+
+            string tga = FindCaseInsensitive(directory, baseName + ".tga");
+            if (tga == null)
+                return null;
+
+            var tex = LoadTGA(tga);
+            if (tex == null)
+                return null;
+            width = tex.width;
+            height = tex.height;
+            var pixels = tex.GetPixels32();
+            Object.DestroyImmediate(tex);
+            return pixels;
+        }
+
+        private static Color32[] DecodeDds(byte[] data, out int width, out int height)
+        {
+            width = height = 0;
+            if (data.Length < 128 || data[0] != 'D' || data[1] != 'D' || data[2] != 'S' || data[3] != ' ')
+                return null;
+
+            height = ReadInt(data, 12);
+            width = ReadInt(data, 16);
+            uint pfFlags = (uint)ReadInt(data, 80);
+            string fourCC = "" + (char)data[84] + (char)data[85] + (char)data[86] + (char)data[87];
+            int bpp = ReadInt(data, 88);
+            if ((pfFlags & 0x4) != 0)
+            {
+                switch (fourCC)
+                {
+                    case "DXT1": return DecompressDXT1(data, 128, width, height);
+                    case "DXT3": return DecompressDXT3(data, 128, width, height);
+                    case "DXT5": return DecompressDXT5(data, 128, width, height);
+                    default: return null;
+                }
+            }
+
+            return bpp == 24 || bpp == 32 ? ReadUncompressed(data, 128, width, height, bpp) : null;
         }
 
         private Texture2D LoadDDS(string path)
@@ -196,7 +355,12 @@ namespace W3DImporter.Builders
                 format = TextureFormat.DXT1;
                 mip0Size = Mathf.Max(1, (width + 3) / 4) * Mathf.Max(1, (height + 3) / 4) * 8;
             }
-            else if (compressed && (fourCC == "DXT5" || fourCC == "DXT3"))
+            else if (compressed && fourCC == "DXT3")
+            {
+                // Unity has no DXT3 format (its alpha blocks differ from DXT5): decode it
+                return LoadDDS_Software(data, headerSize, width, height, fourCC, bpp, path);
+            }
+            else if (compressed && fourCC == "DXT5")
             {
                 format = TextureFormat.DXT5;
                 mip0Size = Mathf.Max(1, (width + 3) / 4) * Mathf.Max(1, (height + 3) / 4) * 16;
@@ -236,7 +400,7 @@ namespace W3DImporter.Builders
                 tex.Apply(true);
                 tex.wrapMode = TextureWrapMode.Repeat;
                 tex.filterMode = FilterMode.Bilinear;
-                Debug.Log($"[W3D] Loaded DDS: {path} ({width}x{height} {fourCC} bpp={bpp} size={mip0Size})");
+                if (W3DLog.Verbose) Debug.Log($"[W3D] Loaded DDS: {path} ({width}x{height} {fourCC} bpp={bpp} size={mip0Size})");
                 return tex;
             }
             catch (System.Exception e)
@@ -266,7 +430,7 @@ namespace W3DImporter.Builders
             tex.Apply(true);
             tex.wrapMode = TextureWrapMode.Repeat;
             tex.filterMode = FilterMode.Bilinear;
-            Debug.Log($"[W3D] Loaded DDS (24-bit): {path} ({width}x{height})");
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Loaded DDS (24-bit): {path} ({width}x{height})");
             return tex;
         }
 
@@ -275,7 +439,9 @@ namespace W3DImporter.Builders
             Color32[] pixels = null;
             if (fourCC == "DXT1")
                 pixels = DecompressDXT1(data, offset, width, height);
-            else if (fourCC == "DXT5" || fourCC == "DXT3")
+            else if (fourCC == "DXT3")
+                pixels = DecompressDXT3(data, offset, width, height);
+            else if (fourCC == "DXT5")
                 pixels = DecompressDXT5(data, offset, width, height);
 
             if (pixels == null) return null;
@@ -286,7 +452,7 @@ namespace W3DImporter.Builders
             tex.Apply(true);
             tex.wrapMode = TextureWrapMode.Repeat;
             tex.filterMode = FilterMode.Bilinear;
-            Debug.Log($"[W3D] Loaded DDS (software): {path} ({width}x{height} {fourCC})");
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Loaded DDS (software): {path} ({width}x{height} {fourCC})");
             return tex;
         }
 
@@ -402,7 +568,55 @@ namespace W3DImporter.Builders
 
                             var c = palette[colorIdx];
                             c.a = alphaPalette[alphaIdx];
-                            pixels[(height - 1 - y) * width + x] = c;
+                            pixels[y * width + x] = c;
+                        }
+                    }
+                }
+            }
+            return pixels;
+        }
+
+        // DXT3: 4-bit explicit alpha per pixel, then a 4-color DXT1 color block.
+        private static Color32[] DecompressDXT3(byte[] data, int offset, int width, int height)
+        {
+            var pixels = new Color32[width * height];
+            int blocksW = (width + 3) / 4;
+            int blocksH = (height + 3) / 4;
+            var palette = new Color32[4];
+
+            for (int by = 0; by < blocksH; by++)
+            {
+                for (int bx = 0; bx < blocksW; bx++)
+                {
+                    if (offset + 16 > data.Length) break;
+
+                    int alphaOffset = offset;
+                    offset += 8;
+
+                    ushort c0 = (ushort)(data[offset] | (data[offset + 1] << 8));
+                    ushort c1 = (ushort)(data[offset + 2] | (data[offset + 3] << 8));
+                    uint lookup = (uint)(data[offset + 4] | (data[offset + 5] << 8) |
+                                         (data[offset + 6] << 16) | (data[offset + 7] << 24));
+                    offset += 8;
+
+                    palette[0] = RGB565ToColor(c0);
+                    palette[1] = RGB565ToColor(c1);
+                    palette[2] = LerpColor(palette[0], palette[1], 1, 3);
+                    palette[3] = LerpColor(palette[0], palette[1], 2, 3);
+
+                    for (int py = 0; py < 4; py++)
+                    {
+                        for (int px = 0; px < 4; px++)
+                        {
+                            int x = bx * 4 + px;
+                            int y = by * 4 + py;
+                            if (x >= width || y >= height) continue;
+
+                            int pixel = py * 4 + px;
+                            int alpha4 = (data[alphaOffset + pixel / 2] >> ((pixel & 1) * 4)) & 0xF;
+                            var c = palette[(int)((lookup >> (py * 8 + px * 2)) & 0x3)];
+                            c.a = (byte)(alpha4 * 17);
+                            pixels[y * width + x] = c;
                         }
                     }
                 }
@@ -455,7 +669,7 @@ namespace W3DImporter.Builders
             return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
         }
 
-        private Texture2D LoadTGA(string path)
+        private static Texture2D LoadTGA(string path)
         {
             byte[] data = File.ReadAllBytes(path);
             if (data.Length < 18) return null;
@@ -526,7 +740,7 @@ namespace W3DImporter.Builders
             tex.Apply(true);
             tex.wrapMode = TextureWrapMode.Repeat;
             tex.filterMode = FilterMode.Bilinear;
-            Debug.Log($"[W3D] Loaded TGA: {path} ({width}x{height} type={imageType} bpp={bpp})");
+            if (W3DLog.Verbose) Debug.Log($"[W3D] Loaded TGA: {path} ({width}x{height} type={imageType} bpp={bpp})");
             return tex;
         }
 
@@ -559,19 +773,27 @@ namespace W3DImporter.Builders
             pixels[y * width + x] = color;
         }
 
-        private string FindCaseInsensitive(string directory, string filename)
+        private static string FindCaseInsensitive(string directory, string filename)
         {
-            if (!Directory.Exists(directory)) return null;
+            var files = GetDirectoryIndex(directory);
+            return files != null && files.TryGetValue(filename, out var path) ? path : null;
+        }
 
-            string direct = Path.Combine(directory, filename);
-            if (File.Exists(direct)) return direct;
+        private static Dictionary<string, string> GetDirectoryIndex(string directory)
+        {
+            if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
+                return null;
 
-            foreach (var file in Directory.GetFiles(directory))
-            {
-                if (Path.GetFileName(file).Equals(filename, System.StringComparison.OrdinalIgnoreCase))
-                    return file;
-            }
-            return null;
+            // a directory's write time changes when entries are added, removed or renamed
+            var stamp = Directory.GetLastWriteTimeUtc(directory);
+            if (DirectoryIndexes.TryGetValue(directory, out var cached) && cached.Stamp == stamp)
+                return cached.Files;
+
+            var files = new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.EnumerateFiles(directory))
+                files[Path.GetFileName(file)] = file;
+            DirectoryIndexes[directory] = new DirectoryIndex { Stamp = stamp, Files = files };
+            return files;
         }
 
         private Texture2D CreateFallbackTexture(string name)

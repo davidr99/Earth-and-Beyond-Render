@@ -43,9 +43,13 @@ namespace W3DImporter.IO
 
         public IEnumerable<W3DChunkHeader> EnumerateChunks(long endPosition)
         {
-            while (_reader.Position < endPosition)
+            // Stop when no full chunk header fits; a child chunk never extends past its parent.
+            while (_reader.Position + 8 <= endPosition)
             {
-                yield return ReadChunkHeader();
+                var chunk = ReadChunkHeader();
+                if (chunk.ChunkEnd > endPosition)
+                    chunk.ChunkEnd = endPosition;
+                yield return chunk;
             }
         }
     }

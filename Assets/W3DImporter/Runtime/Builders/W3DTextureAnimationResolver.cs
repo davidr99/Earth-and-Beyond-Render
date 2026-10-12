@@ -48,6 +48,8 @@ namespace W3DImporter.Builders
         public int PrimaryTextureIndex = -1;
         public int SecondaryTextureIndex = -1;
         public int ShaderIndex = -1;
+        // first triangle using this binding; per-face / per-vertex ids of any stage resolve through it
+        public int RepresentativeFace = -1;
     }
 
     public sealed class W3DResolvedTextureAnimation
@@ -205,20 +207,16 @@ namespace W3DImporter.Builders
             return results;
         }
 
+        // Materials are built from the base pass. Additional passes (environment / glow overlays)
+        // are drawn on top of it by the client and are not mapped to separate Unity materials.
         public static W3DMaterialPass ResolveMaterialPass(W3DMesh w3dMesh, int materialIndex, out int passIndex)
         {
             passIndex = -1;
             if (w3dMesh == null || w3dMesh.MaterialPasses.Count == 0)
                 return null;
 
-            if (w3dMesh.MaterialPasses.Count == 1)
-            {
-                passIndex = 0;
-                return w3dMesh.MaterialPasses[0];
-            }
-
-            passIndex = Math.Max(0, Math.Min(materialIndex, w3dMesh.MaterialPasses.Count - 1));
-            return w3dMesh.MaterialPasses[passIndex];
+            passIndex = 0;
+            return w3dMesh.MaterialPasses[0];
         }
 
         public static W3DVertexMaterial ResolveVertexMaterial(W3DMesh w3dMesh, int materialIndex)
@@ -226,7 +224,7 @@ namespace W3DImporter.Builders
             var pass = ResolveMaterialPass(w3dMesh, materialIndex, out _);
             if (pass != null && pass.VertexMaterialIds.Count > 0)
             {
-                int vmIndex = pass.VertexMaterialIds[Math.Max(0, Math.Min(materialIndex, pass.VertexMaterialIds.Count - 1))];
+                int vmIndex = FaceVertexMaterialId(w3dMesh, pass, RepresentativeFace(w3dMesh, materialIndex));
                 if (vmIndex >= 0 && vmIndex < w3dMesh.VertMaterials.Count)
                     return w3dMesh.VertMaterials[vmIndex];
             }
@@ -242,7 +240,7 @@ namespace W3DImporter.Builders
             var pass = ResolveMaterialPass(w3dMesh, materialIndex, out _);
             if (pass != null && pass.ShaderMaterialIds.Count > 0)
             {
-                int shaderMaterialIndex = pass.ShaderMaterialIds[Math.Max(0, Math.Min(materialIndex, pass.ShaderMaterialIds.Count - 1))];
+                int shaderMaterialIndex = PassId(pass.ShaderMaterialIds, RepresentativeFace(w3dMesh, materialIndex));
                 if (shaderMaterialIndex >= 0 && shaderMaterialIndex < w3dMesh.ShaderMaterials.Count)
                     return w3dMesh.ShaderMaterials[shaderMaterialIndex];
             }
@@ -258,7 +256,7 @@ namespace W3DImporter.Builders
             var pass = ResolveMaterialPass(w3dMesh, materialIndex, out _);
             if (pass != null && pass.ShaderIds.Count > 0)
             {
-                int shaderIndex = pass.ShaderIds[Math.Max(0, Math.Min(materialIndex, pass.ShaderIds.Count - 1))];
+                int shaderIndex = PassId(pass.ShaderIds, RepresentativeFace(w3dMesh, materialIndex));
                 if (shaderIndex >= 0 && shaderIndex < w3dMesh.Shaders.Count)
                     return w3dMesh.Shaders[shaderIndex];
             }
@@ -267,6 +265,115 @@ namespace W3DImporter.Builders
                 return w3dMesh.Shaders[materialIndex];
 
             return null;
+        }
+
+        // ------------------------------------------------------------------
+        // Material pass id arrays hold either one id for the whole pass or one id per
+        // element (client FUN_009bbec0 / FUN_009bbf80 / FUN_009bc810):
+        //   VERTEX_MATERIAL_IDS (0x39) - one per VERTEX
+        //   SHADER_IDS (0x3A), TEXTURE_IDS (0x49) - one per TRIANGLE, texture id -1 = none
+        // ------------------------------------------------------------------
+
+        private sealed class FaceBindingCache
+        {
+            public readonly List<int> FaceIndices = new List<int>();
+            public readonly List<W3DFaceMaterialBinding> Bindings = new List<W3DFaceMaterialBinding>();
+        }
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<W3DMesh, FaceBindingCache> FaceBindingCaches =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<W3DMesh, FaceBindingCache>();
+
+        private static int PassId(List<int> ids, int face)
+        {
+            if (ids == null || ids.Count == 0)
+                return -1;
+            if (ids.Count == 1 || face < 0 || face >= ids.Count)
+                return ids[0];
+            return ids[face];
+        }
+
+        private static int FaceVertexMaterialId(W3DMesh w3dMesh, W3DMaterialPass pass, int face)
+        {
+            var ids = pass?.VertexMaterialIds;
+            if (ids == null || ids.Count == 0)
+                return -1;
+            if (ids.Count == 1)
+                return ids[0];
+
+            var tri = face >= 0 && face < w3dMesh.Triangles.Count ? w3dMesh.Triangles[face] : null;
+            if (ids.Count == w3dMesh.Verts.Count && tri != null && tri.VertIds[0] < ids.Count)
+                return ids[(int)tri.VertIds[0]];
+            if (ids.Count == w3dMesh.Triangles.Count)
+                return PassId(ids, face);
+            return ids[0];
+        }
+
+        private static int FaceTextureId(W3DMesh w3dMesh, W3DMaterialPass pass, int stageIndex, int face)
+        {
+            if (pass == null || stageIndex < 0 || stageIndex >= pass.TxStages.Count)
+                return -1;
+
+            var stage = pass.TxStages[stageIndex];
+            if (stage?.TxIds == null || stage.TxIds.Count == 0)
+                return -1;
+
+            int textureIndex = PassId(stage.TxIds[0], face);
+            return textureIndex >= 0 && textureIndex < w3dMesh.Textures.Count ? textureIndex : -1;
+        }
+
+        private static FaceBindingCache GetFaceBindings(W3DMesh w3dMesh)
+        {
+            if (w3dMesh?.Triangles == null || w3dMesh.Triangles.Count == 0 || w3dMesh.MaterialPasses.Count == 0)
+                return null;
+
+            if (FaceBindingCaches.TryGetValue(w3dMesh, out var cached))
+                return cached;
+
+            var pass = w3dMesh.MaterialPasses[0];
+            var cache = new FaceBindingCache();
+            var bindingIndexByKey = new Dictionary<(int, int, int, int), int>();
+
+            for (int face = 0; face < w3dMesh.Triangles.Count; face++)
+            {
+                int vertexMaterialIndex = FaceVertexMaterialId(w3dMesh, pass, face);
+                int shaderIndex = PassId(pass.ShaderIds, face);
+                int primaryTextureIndex = FaceTextureId(w3dMesh, pass, 0, face);
+                int secondaryTextureIndex = FaceTextureId(w3dMesh, pass, 1, face);
+                var key = (vertexMaterialIndex, primaryTextureIndex, secondaryTextureIndex, shaderIndex);
+
+                if (!bindingIndexByKey.TryGetValue(key, out int bindingIndex))
+                {
+                    bindingIndex = cache.Bindings.Count;
+                    bindingIndexByKey[key] = bindingIndex;
+                    cache.Bindings.Add(new W3DFaceMaterialBinding
+                    {
+                        VertexMaterialIndex = vertexMaterialIndex,
+                        PrimaryTextureIndex = primaryTextureIndex,
+                        SecondaryTextureIndex = secondaryTextureIndex,
+                        ShaderIndex = shaderIndex,
+                        RepresentativeFace = face
+                    });
+                }
+
+                cache.FaceIndices.Add(bindingIndex);
+            }
+
+            FaceBindingCaches.Add(w3dMesh, cache);
+            return cache;
+        }
+
+        // Material index -> triangle whose ids describe that material. With a per-face split the
+        // material index is the binding index; otherwise every face shares the same ids.
+        private static int RepresentativeFace(W3DMesh w3dMesh, int materialIndex)
+        {
+            var cache = GetFaceBindings(w3dMesh);
+            if (cache == null || cache.Bindings.Count == 0)
+                return 0;
+
+            if (cache.Bindings.Count > 1 && materialIndex >= 0 && materialIndex < cache.Bindings.Count)
+                return cache.Bindings[materialIndex].RepresentativeFace;
+
+            return cache.Bindings[0].RepresentativeFace;
         }
 
         public static int FindTextureIndexByName(W3DMesh w3dMesh, string textureName)
@@ -393,6 +500,56 @@ namespace W3DImporter.Builders
             });
         }
 
+        // Texture coordinate generation of the environment mapper families, done by the shader
+        // (W3DCombine.hlsl W3DTexGen; the mapper Apply functions were decoded from client.exe:
+        // "classic" / cheap mappers use the camera-space normal, the others the reflection vector,
+        // WS mappers rotate it into world space and project along Axis, grid mappers squeeze the
+        // result into one cell of a (1 << Log2Width)^2 atlas). Returns the W3DTexGen kind, 0 = mesh uvs.
+        public static int GetStageTexGen(W3DVertexMaterial vm, int stageIndex, out int axis, out UnityEngine.Vector4 grid)
+        {
+            axis = 2;
+            grid = new UnityEngine.Vector4(1f, 0f, 0f, 1f);
+            if (vm?.Info == null)
+                return 0;
+
+            int mapper = (int)((stageIndex == 0 ? vm.Info.Attributes >> 16 : vm.Info.Attributes >> 8) & 0xFF);
+            string args = stageIndex == 0 ? vm.VmArgs0 : vm.VmArgs1;
+            int kind;
+            bool gridded = false;
+            switch (mapper)
+            {
+                case 1: kind = 1; break;                  // environment
+                case 2: kind = 2; break;                  // cheap environment
+                case 12: kind = 3; break;                 // WS classic environment
+                case 13: kind = 4; break;                 // WS environment
+                case 14: kind = 2; gridded = true; break; // grid classic environment
+                case 15: kind = 1; gridded = true; break; // grid environment
+                case 19: kind = 3; gridded = true; break; // grid WS classic environment
+                case 20: kind = 4; gridded = true; break; // grid WS environment
+                default: return 0;
+            }
+
+            if (kind >= 3 && TryGetIniValue(args, "Axis", out string axisName) && axisName.Length > 0)
+            {
+                char c = char.ToUpperInvariant(axisName[0]);
+                axis = c == 'X' ? 0 : c == 'Y' ? 1 : 2;
+            }
+
+            if (gridded)
+            {
+                int width = 1 << Math.Max(0, Math.Min(GetIniInt(args, "Log2Width", 1), 8));
+                int cells = width * width;
+                int last = GetIniInt(args, "Last", 0);
+                grid = new UnityEngine.Vector4(
+                    width,
+                    GetIniFloat(args, "FPS", 1f),
+                    Math.Max(0, GetIniInt(args, "Offset", 0)),
+                    last > 0 ? Math.Min(last, cells) : cells);
+            }
+
+            return kind;
+        }
+
         private static W3DResolvedTextureAnimation CreateMapperAnimation(
             int materialIndex,
             W3DTextureBinding binding,
@@ -400,6 +557,11 @@ namespace W3DImporter.Builders
             int rawMapping,
             string args)
         {
+            // environment mappers are handled by the shader (GetStageTexGen)
+            int mapper = stageIndex == 0 ? rawMapping >> 16 : rawMapping >> 8;
+            if (mapper == 1 || mapper == 2 || (mapper >= 12 && mapper <= 15) || mapper == 19 || mapper == 20)
+                return null;
+
             string mapperName = GetMapperName(stageIndex, rawMapping);
             if (string.IsNullOrEmpty(mapperName))
                 return null;
@@ -532,6 +694,11 @@ namespace W3DImporter.Builders
                     if (binding != null)
                         return binding;
                 }
+
+                // The pass defines its textures; texture id -1 (or no TEXTURE_IDS) means the
+                // client draws these faces untextured, so don't borrow another texture.
+                if (pass.TxStages.Count > 0)
+                    return null;
             }
 
             if (materialIndex >= 0 && materialIndex < w3dMesh.Textures.Count)
@@ -568,15 +735,8 @@ namespace W3DImporter.Builders
             if (pass == null || stageIndex >= pass.TxStages.Count)
                 return null;
 
-            var stage = pass.TxStages[stageIndex];
-            if (stage?.TxIds == null || stage.TxIds.Count == 0 || stage.TxIds[0] == null || stage.TxIds[0].Count == 0)
-                return null;
-
-            int textureSlot = materialIndex >= 0 && materialIndex < stage.TxIds[0].Count
-                ? materialIndex
-                : 0;
-            int textureIndex = stage.TxIds[0][textureSlot];
-            if (textureIndex < 0 || textureIndex >= w3dMesh.Textures.Count)
+            int textureIndex = FaceTextureId(w3dMesh, pass, stageIndex, RepresentativeFace(w3dMesh, materialIndex));
+            if (textureIndex < 0)
                 return null;
 
             return new W3DTextureBinding
@@ -589,6 +749,8 @@ namespace W3DImporter.Builders
             };
         }
 
+        // Splits the mesh by (vertex material, stage 0 texture, stage 1 texture, shader) of the
+        // base pass. Returns false when every triangle shares one binding (single material).
         public static bool TryResolveFaceMaterialBindings(
             W3DMesh w3dMesh,
             int materialIndex,
@@ -598,87 +760,12 @@ namespace W3DImporter.Builders
             faceBindingIndices = null;
             usedBindings = null;
 
-            if (w3dMesh?.Triangles == null || w3dMesh.Triangles.Count == 0)
+            var cache = GetFaceBindings(w3dMesh);
+            if (cache == null || cache.Bindings.Count <= 1)
                 return false;
 
-            if (w3dMesh.Header == null || w3dMesh.Header.MatlCount <= 1)
-                return false;
-
-            var pass = ResolveMaterialPass(w3dMesh, materialIndex, out _);
-            if (pass == null)
-                return false;
-
-            var binding = ResolvePrimaryTextureBinding(w3dMesh, materialIndex);
-            int stageIndex = binding != null && binding.StageIndex >= 0 ? binding.StageIndex : 0;
-            if (stageIndex < 0 || stageIndex >= pass.TxStages.Count)
-                return false;
-
-            var stage = pass.TxStages[stageIndex];
-            if (stage?.TxIds == null || stage.TxIds.Count == 0 || stage.TxIds[0] == null)
-                return false;
-
-            var txIds = stage.TxIds[0];
-            bool texturesPerFace = txIds.Count == w3dMesh.Triangles.Count;
-            bool vertexMaterialsPerFace = pass.VertexMaterialIds.Count == w3dMesh.Triangles.Count;
-            if (!texturesPerFace && !vertexMaterialsPerFace)
-                return false;
-
-            List<int> secondaryIds = null;
-            if (pass.TxStages.Count > 1)
-            {
-                var secondaryStage = pass.TxStages[1];
-                if (secondaryStage?.TxIds != null &&
-                    secondaryStage.TxIds.Count > 0 &&
-                    secondaryStage.TxIds[0] != null &&
-                    secondaryStage.TxIds[0].Count == w3dMesh.Triangles.Count)
-                {
-                    secondaryIds = secondaryStage.TxIds[0];
-                }
-            }
-
-            bool shaderIdsPerFace = pass.ShaderIds.Count == w3dMesh.Triangles.Count;
-            var orderedBindings = new List<W3DFaceMaterialBinding>();
-            var bindingIndexByKey = new Dictionary<string, int>();
-            var perFaceBindingIndices = new List<int>(w3dMesh.Triangles.Count);
-
-            for (int i = 0; i < w3dMesh.Triangles.Count; i++)
-            {
-                int primaryTextureIndex = texturesPerFace ? txIds[i] : -1;
-                if (primaryTextureIndex >= w3dMesh.Textures.Count)
-                    return false;
-
-                int secondaryTextureIndex = secondaryIds != null ? secondaryIds[i] : -1;
-                if (secondaryTextureIndex >= w3dMesh.Textures.Count)
-                    secondaryTextureIndex = -1;
-
-                int shaderIndex = shaderIdsPerFace ? pass.ShaderIds[i] : -1;
-                int vertexMaterialIndex = vertexMaterialsPerFace ? pass.VertexMaterialIds[i] : -1;
-                string key = vertexMaterialIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                             "|" + primaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                             "|" + secondaryTextureIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                             "|" + shaderIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
-
-                if (!bindingIndexByKey.TryGetValue(key, out int bindingIndex))
-                {
-                    bindingIndex = orderedBindings.Count;
-                    bindingIndexByKey[key] = bindingIndex;
-                    orderedBindings.Add(new W3DFaceMaterialBinding
-                    {
-                        VertexMaterialIndex = vertexMaterialIndex,
-                        PrimaryTextureIndex = primaryTextureIndex,
-                        SecondaryTextureIndex = secondaryTextureIndex,
-                        ShaderIndex = shaderIndex
-                    });
-                }
-
-                perFaceBindingIndices.Add(bindingIndex);
-            }
-
-            if (orderedBindings.Count <= 1)
-                return false;
-
-            faceBindingIndices = perFaceBindingIndices;
-            usedBindings = orderedBindings;
+            faceBindingIndices = cache.FaceIndices;
+            usedBindings = cache.Bindings;
             return true;
         }
 

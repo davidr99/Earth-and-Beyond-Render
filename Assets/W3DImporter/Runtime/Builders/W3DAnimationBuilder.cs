@@ -10,8 +10,48 @@ namespace W3DImporter.Builders
     // carries a full quaternion per frame. Visibility rides on W3DAnimationBitChannel
     // (channel 15). Coordinate conversion is applied per frame so the resulting Unity
     // curves line up with the already-converted base pose written by BuildHierarchy.
+    //
+    // Channel values are DELTAS applied on top of the pivot's base pose, as in WW3D
+    // (pivot = parent * base * Translate(t) * Rotate(q)); a frame outside a channel's
+    // range contributes zero translation / identity rotation. In the game files the
+    // first-frame translation is ~0 for pivots whose base translation is not.
     public static class W3DAnimationBuilder
     {
+        // Animations for pre-3.0 hierarchies index pivots without the implicit root pivot
+        // that the client (and W3DHierarchyParser) inserts.
+        internal static int PivotShift(uint animationVersion)
+        {
+            return animationVersion < 0x30000 ? 1 : 0;
+        }
+
+        internal static Vector3 ComposeTranslation(W3DHierarchyPivot pivot, Vector3 delta)
+        {
+            return W3DCoordinateConverter.ConvertPosition(pivot.Translation + pivot.Rotation * delta);
+        }
+
+        internal static Quaternion ComposeRotation(W3DHierarchyPivot pivot, Quaternion delta)
+        {
+            return W3DCoordinateConverter.ConvertRotation(pivot.Rotation * delta);
+        }
+
+        // WW3D interpolates linearly (slerp for rotations) between keys.
+        internal static void MakeLinear(AnimationCurve curve)
+        {
+            if (curve == null || curve.length < 2)
+                return;
+
+            var keys = curve.keys;
+            for (int i = 0; i + 1 < keys.Length; i++)
+            {
+                float dt = keys[i + 1].time - keys[i].time;
+                float slope = dt > 0f ? (keys[i + 1].value - keys[i].value) / dt : 0f;
+                keys[i].outTangent = slope;
+                keys[i + 1].inTangent = slope;
+            }
+            keys[0].inTangent = keys[0].outTangent;
+            keys[keys.Length - 1].outTangent = keys[keys.Length - 1].inTangent;
+            curve.keys = keys;
+        }
         public static AnimationClip Build(W3DAnimation anim, W3DHierarchy hierarchy)
         {
             if (anim?.Header == null || hierarchy == null || hierarchy.Pivots.Count == 0)
@@ -28,14 +68,16 @@ namespace W3DImporter.Builders
             };
 
             var bonePaths = BuildBonePaths(hierarchy);
+            int pivotShift = PivotShift(anim.Header.Version);
 
             var byPivot = new Dictionary<int, List<W3DAnimationChannel>>();
             foreach (var ch in anim.Channels)
             {
-                if (!byPivot.TryGetValue(ch.Pivot, out var list))
+                int pivotIndex = ch.Pivot + pivotShift;
+                if (!byPivot.TryGetValue(pivotIndex, out var list))
                 {
                     list = new List<W3DAnimationChannel>();
-                    byPivot[ch.Pivot] = list;
+                    byPivot[pivotIndex] = list;
                 }
                 list.Add(ch);
             }
@@ -60,17 +102,17 @@ namespace W3DImporter.Builders
                 }
 
                 if (tx != null || ty != null || tz != null)
-                    BuildTranslationCurves(clip, path, tx, ty, tz, pivot.Translation, frameDuration);
+                    BuildTranslationCurves(clip, path, tx, ty, tz, pivot, frameDuration);
 
                 if (quat != null)
-                    BuildRotationCurves(clip, path, quat, frameDuration);
+                    BuildRotationCurves(clip, path, quat, pivot, frameDuration);
             }
 
             foreach (var bit in anim.BitChannels)
             {
                 if (bit.ChannelType != W3DBitChannelTypes.Visibility)
                     continue;
-                if (!bonePaths.TryGetValue(bit.Pivot, out var path))
+                if (!bonePaths.TryGetValue(bit.Pivot + pivotShift, out var path))
                     continue;
                 BuildVisibilityCurve(clip, path, bit, frameDuration);
             }
@@ -96,7 +138,7 @@ namespace W3DImporter.Builders
 
         private static void BuildTranslationCurves(AnimationClip clip, string path,
             W3DAnimationChannel tx, W3DAnimationChannel ty, W3DAnimationChannel tz,
-            Vector3 basePoseW3D, float frameDuration)
+            W3DHierarchyPivot pivot, float frameDuration)
         {
             int first = int.MaxValue, last = int.MinValue;
             Accumulate(tx, ref first, ref last);
@@ -110,24 +152,28 @@ namespace W3DImporter.Builders
 
             for (int frame = first; frame <= last; frame++)
             {
-                float wx = SampleScalar(tx, frame, basePoseW3D.x);
-                float wy = SampleScalar(ty, frame, basePoseW3D.y);
-                float wz = SampleScalar(tz, frame, basePoseW3D.z);
+                var delta = new Vector3(
+                    SampleScalar(tx, frame, 0f),
+                    SampleScalar(ty, frame, 0f),
+                    SampleScalar(tz, frame, 0f));
 
-                Vector3 unity = W3DCoordinateConverter.ConvertPosition(new Vector3(wx, wy, wz));
+                Vector3 unity = ComposeTranslation(pivot, delta);
                 float time = frame * frameDuration;
                 curveX.AddKey(time, unity.x);
                 curveY.AddKey(time, unity.y);
                 curveZ.AddKey(time, unity.z);
             }
 
+            MakeLinear(curveX);
+            MakeLinear(curveY);
+            MakeLinear(curveZ);
             clip.SetCurve(path, typeof(Transform), "localPosition.x", curveX);
             clip.SetCurve(path, typeof(Transform), "localPosition.y", curveY);
             clip.SetCurve(path, typeof(Transform), "localPosition.z", curveZ);
         }
 
         private static void BuildRotationCurves(AnimationClip clip, string path,
-            W3DAnimationChannel quat, float frameDuration)
+            W3DAnimationChannel quat, W3DHierarchyPivot pivot, float frameDuration)
         {
             if (quat.VectorLen != 4 || quat.Data.Count < 4)
                 return;
@@ -149,7 +195,7 @@ namespace W3DImporter.Builders
                     quat.Data[offset + 2],
                     quat.Data[offset + 3]);
 
-                var unity = W3DCoordinateConverter.ConvertRotation(w3d);
+                var unity = ComposeRotation(pivot, w3d);
                 float time = (quat.FirstFrame + f) * frameDuration;
 
                 curveX.AddKey(time, unity.x);
@@ -158,6 +204,10 @@ namespace W3DImporter.Builders
                 curveW.AddKey(time, unity.w);
             }
 
+            MakeLinear(curveX);
+            MakeLinear(curveY);
+            MakeLinear(curveZ);
+            MakeLinear(curveW);
             clip.SetCurve(path, typeof(Transform), "localRotation.x", curveX);
             clip.SetCurve(path, typeof(Transform), "localRotation.y", curveY);
             clip.SetCurve(path, typeof(Transform), "localRotation.z", curveZ);

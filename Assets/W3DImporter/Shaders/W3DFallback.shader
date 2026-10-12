@@ -15,6 +15,13 @@ Shader "W3D/Opaque"
         [Toggle] _DebugUV ("Debug UVs", Float) = 0
         _DetailColorFunc ("Detail Color Func", Float) = 0
         _DetailAlphaFunc ("Detail Alpha Func", Float) = 0
+        _PriGradient ("Primary Gradient", Float) = 1
+        [HideInInspector] _BaseTexGen ("Stage 0 Texgen", Float) = 0
+        [HideInInspector] _BaseTexGenAxis ("Stage 0 Texgen Axis", Float) = 2
+        [HideInInspector] _BaseTexGenGrid ("Stage 0 Texgen Grid", Vector) = (1,0,0,1)
+        [HideInInspector] _DetailTexGen ("Stage 1 Texgen", Float) = 0
+        [HideInInspector] _DetailTexGenAxis ("Stage 1 Texgen Axis", Float) = 2
+        [HideInInspector] _DetailTexGenGrid ("Stage 1 Texgen Grid", Vector) = (1,0,0,1)
         _DetailUseUV2 ("Detail Uses UV2", Float) = 1
         [Toggle] _ApplyLighting ("Apply Lighting", Float) = 1
         [Toggle] _UseVertexColor ("Use Vertex Color", Float) = 0
@@ -52,6 +59,7 @@ Shader "W3D/Opaque"
 
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
+            #include "W3DCombine.hlsl"
 
             TEXTURE2D(_BaseColorMap);
             SAMPLER(sampler_BaseColorMap);
@@ -68,6 +76,13 @@ Shader "W3D/Opaque"
                 float _DebugUV;
                 float _DetailColorFunc;
                 float _DetailAlphaFunc;
+                float _PriGradient;
+                float _BaseTexGen;
+                float _BaseTexGenAxis;
+                float4 _BaseTexGenGrid;
+                float _DetailTexGen;
+                float _DetailTexGenAxis;
+                float4 _DetailTexGenGrid;
                 float _DetailUseUV2;
                 float _ApplyLighting;
                 float _UseVertexColor;
@@ -97,32 +112,7 @@ Shader "W3D/Opaque"
                 float4 color      : COLOR;
             };
 
-            float3 ApplyDetailColor(float4 localCol, float4 detailCol, int func)
-            {
-                switch (func)
-                {
-                    case 1: return detailCol.rgb;
-                    case 2: return localCol.rgb * detailCol.rgb;
-                    case 3: return saturate(localCol.rgb + detailCol.rgb - (localCol.rgb * detailCol.rgb));
-                    case 4: return saturate(localCol.rgb + detailCol.rgb);
-                    case 5: return saturate(localCol.rgb - detailCol.rgb);
-                    case 6: return saturate(detailCol.rgb - localCol.rgb);
-                    case 7: return lerp(localCol.rgb, detailCol.rgb, detailCol.a);
-                    case 8: return lerp(localCol.rgb, detailCol.rgb, localCol.a);
-                    default: return localCol.rgb;
-                }
-            }
 
-            float ApplyDetailAlpha(float localAlpha, float detailAlpha, int func)
-            {
-                switch (func)
-                {
-                    case 1: return detailAlpha;
-                    case 2: return saturate(localAlpha * detailAlpha);
-                    case 3: return saturate(localAlpha + detailAlpha - (localAlpha * detailAlpha));
-                    default: return localAlpha;
-                }
-            }
 
             float3 ApplyW3DPreviewLighting(float3 color, float3 normalWS)
             {
@@ -149,8 +139,17 @@ Shader "W3D/Opaque"
                 float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
                 output.positionCS = TransformWorldToHClip(positionWS);
                 output.normalWS   = TransformObjectToWorldNormal(input.normalOS);
-                output.uv         = input.uv;
-                output.uv2        = (_DetailUseUV2 > 0.5) ? input.uv2 : input.uv;
+                // environment mappers generate their stage's coordinates (W3DTexGen)
+                float3 normalWS   = normalize(output.normalWS);
+                float3 reflectWS  = reflect(-GetWorldSpaceNormalizeViewDir(positionWS), normalWS);
+                float3x3 worldToView = (float3x3)GetWorldToViewMatrix();
+                float3 normalVS   = normalize(mul(worldToView, normalWS));
+                float3 reflectVS  = mul(worldToView, reflectWS);
+                output.uv         = W3DTexGen(_BaseTexGen, _BaseTexGenAxis, _BaseTexGenGrid, input.uv,
+                                              normalVS, reflectVS, normalWS, reflectWS);
+                output.uv2        = W3DTexGen(_DetailTexGen, _DetailTexGenAxis, _DetailTexGenGrid,
+                                              (_DetailUseUV2 > 0.5) ? input.uv2 : input.uv,
+                                              normalVS, reflectVS, normalWS, reflectWS);
                 output.color      = input.color;
                 return output;
             }
@@ -174,26 +173,27 @@ Shader "W3D/Opaque"
                 float4 tex = SAMPLE_TEXTURE2D(_BaseColorMap, sampler_BaseColorMap, baseUv);
                 float4 detailTex = SAMPLE_TEXTURE2D(_DetailTex, sampler_DetailTex, detailUv);
 
-                float4 col = tex * _BaseColor;
+                // stage 0: texture combined with the (lit) gradient, as the W3D shader's PriGradient says
+                float3 gradient = _BaseColor.rgb;
                 if (_UseVertexColor > 0.5)
-                    col.rgb *= input.color.rgb;
+                    gradient *= input.color.rgb;
+                if (_ApplyLighting > 0.5)
+                    gradient = ApplyW3DPreviewLighting(gradient, isFrontFace ? input.normalWS : -input.normalWS);
+
+                float4 col;
+                col.rgb = W3DApplyPrimaryGradient(tex.rgb, gradient, (int)floor(_PriGradient + 0.5));
+                col.a = tex.a * _BaseColor.a;
 
                 int detailColorFunc = (int)floor(_DetailColorFunc + 0.5);
                 int detailAlphaFunc = (int)floor(_DetailAlphaFunc + 0.5);
                 if (detailColorFunc != 0 || detailAlphaFunc != 0)
                 {
-                    col.rgb = ApplyDetailColor(col, detailTex, detailColorFunc);
-                    col.a = ApplyDetailAlpha(col.a, detailTex.a, detailAlphaFunc);
+                    col.rgb = W3DApplyDetailColor(col, detailTex, detailColorFunc);
+                    col.a = W3DApplyDetailAlpha(col.a, detailTex.a, detailAlphaFunc);
                 }
 
                 if (_AlphaClip > 0.5)
                     clip(col.a - _Cutoff);
-
-                if (_ApplyLighting > 0.5)
-                {
-                    float3 normalWS = isFrontFace ? input.normalWS : -input.normalWS;
-                    col.rgb = ApplyW3DPreviewLighting(col.rgb, normalWS);
-                }
 
                 // E&B vertex materials frequently carry emissive=(255,255,255,0)
                 // on plain textured meshes (e.g. FLOOR_02 in jbar01_h.w3d). Adding

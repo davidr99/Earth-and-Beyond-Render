@@ -869,12 +869,9 @@ namespace W3DImporter
                     if (mat == null)
                         continue;
 
-                    bool hasViewerLighting = false;
-                    if (mat.HasProperty("_ApplyLighting"))
-                    {
-                        mat.SetFloat("_ApplyLighting", 1f);
-                        hasViewerLighting = true;
-                    }
+                    // _ApplyLighting is left as built: surfaces whose W3D lighting does not depend
+                    // on the scene lights (emissive driven, see W3DMaterialBuilder) stay unlit
+                    bool hasViewerLighting = mat.HasProperty("_ApplyLighting");
 
                     if (mat.HasProperty(W3DViewerAmbientColorId))
                     {
